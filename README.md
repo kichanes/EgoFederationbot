@@ -16,10 +16,28 @@ Bot Telegram RPG ringan dengan fitur profile, EXP otomatis, currency, inventory,
    - `BOT_TOKEN`
    - `OWNER_IDS` (pisahkan koma bila lebih dari 1 owner)
    - `DB_PATH` (opsional)
+   - `DATABASE_URL` (opsional, untuk cek koneksi PostgreSQL via Node.js helper)
+   - `PGSSL` (opsional, isi `true` jika koneksi PostgreSQL perlu SSL)
 4. Jalankan bot:
    ```bash
    python bot.py
    ```
+
+## Cek Koneksi DB (Node.js)
+
+Script helper `db-check.js` sudah ditambahkan untuk test koneksi PostgreSQL:
+
+```bash
+npm install
+npm run db:check
+```
+
+Isi `.env` minimal dengan:
+
+```env
+DATABASE_URL=postgres://user:password@host:5432/dbname
+PGSSL=false
+```
 
 ## Command User
 
@@ -66,3 +84,16 @@ Bot Telegram RPG ringan dengan fitur profile, EXP otomatis, currency, inventory,
 - Daily reward: +150 cash +50 exp (premium double).
 - Weekly reward: +500 cash +250 exp +1 token +1 chest random (premium double reward/token).
 - Premium privilege: double EXP, double daily/weekly reward, diskon shop 30%.
+- Lucky Potion (`/lp`) aktif 60 menit dan meningkatkan peluang chest tier bagus saat claim weekly.
+- Daftar shop diambil dari tabel `shop_catalog` (bukan hardcoded output saja).
+
+## Model Shop (Catalog Item)
+
+Struktur tabel:
+
+| id | name   | type        | price |
+|----|--------|-------------|-------|
+| 1  | potion | consumable  | 100   |
+| 2  | sword  | weapon      | 500   |
+
+Tabel ini dibuat otomatis saat bot start (`init_db`) pada nama tabel `shop_catalog`.

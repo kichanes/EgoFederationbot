@@ -54,17 +54,35 @@ SHOP_ITEMS = {
     "luck_potion": {"name": "🧪 Lucky Potion", "price": 5000, "type": "consumable", "desc": "Buff luck +5% (pakai /lp)", "max_stack": 99},
     "shield_3": {"name": "🛡️ Perisai Kelas III", "price": 1000, "type": "consumable", "desc": "Stack max 3, auto saat kena /dor Kelas III", "max_stack": 3},
     "pistol_3": {"name": "🔫 Pistol Kelas III", "price": 5000, "type": "consumable", "desc": "Untuk /dor", "max_stack": 99},
-    "potion_red": {"name": "🧪 Potion Merah", "price": 100, "type": "consumable", "desc": "Tambah HP 10% (pakai /pot)", "max_stack": 99},
+    "potion_red": {"name": "❤️ Potion Merah", "price": 100, "type": "consumable", "desc": "Tambah HP 10% (pakai /pot)", "max_stack": 99},
     "armor_item": {"name": "🦺 Armor", "price": 5000, "type": "consumable", "desc": "Tambah armor +100 (pakai /armor)", "max_stack": 99},
-    "bag_small": {"name": "🎒 Tas Kecil", "price": 5000, "type": "upgrade", "desc": "+3 slot", "capacity": 3},
-    "bag_tenun": {"name": "👜 Tas Tenun", "price": 10000, "type": "upgrade", "desc": "+5 slot", "capacity": 5},
-    "bag_samping": {"name": "🎒 Tas Samping", "price": 15000, "type": "upgrade", "desc": "+7 slot", "capacity": 7},
+    "bag_small": {"name": "👛 Tas Kecil", "price": 5000, "type": "upgrade", "desc": "+3 slot", "capacity": 3},
+    "bag_tenun": {"name": "🛍 Tas Tenun", "price": 10000, "type": "upgrade", "desc": "+5 slot", "capacity": 5},
+    "bag_samping": {"name": "💼 Tas Samping", "price": 15000, "type": "upgrade", "desc": "+7 slot", "capacity": 7},
     "bag_sekolah": {"name": "🎒 Tas Sekolah", "price": 20000, "type": "upgrade", "desc": "+10 slot", "capacity": 10},
-    "bag_gunung": {"name": "🎒 Tas Gunung", "price": 25000, "type": "upgrade", "desc": "+15 slot", "capacity": 15},
+    "bag_gunung": {"name": "🧳 Koper", "price": 25000, "type": "upgrade", "desc": "+15 slot", "capacity": 15},
 }
 
 SECRET_ITEMS = {
     "chest_key": {"name": "🗝️ Kunci Rahasia", "price": 3000, "type": "consumable", "desc": "Kunci untuk event rahasia", "max_stack": 99}
+}
+
+CHEST_RATES = [
+    ("uncommon", 43.0),
+    ("common", 33.0),
+    ("rare", 13.0),
+    ("epic", 7.5),
+    ("legend", 3.0),
+    ("myth", 0.0015),
+]
+
+CHEST_REWARDS = {
+    "uncommon": {"cash": 150, "token": (0, 1), "items": []},
+    "common": {"cash": 250, "token": (0, 2), "items": []},
+    "rare": {"cash": 350, "token": (1, 2), "items": ["banana"]},
+    "epic": {"cash": 500, "token": (1, 3), "items": ["banana", "sandal"]},
+    "legend": {"cash": 750, "token": (2, 3), "items": ["banana", "sandal", "luck_potion"]},
+    "myth": {"cash": 1500, "token": (2, 5), "items": ["banana", "sandal", "luck_potion", "armor_item", "pistol_3"]},
 }
 
 
@@ -129,6 +147,26 @@ def init_db() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS shop_catalog (
+                id INTEGER PRIMARY KEY,
+                code TEXT UNIQUE,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                price INTEGER NOT NULL,
+                description TEXT DEFAULT '',
+                is_secret INTEGER DEFAULT 0
+            )
+            """
+        )
+        columns = {row[1] for row in c.execute("PRAGMA table_info(shop_catalog)").fetchall()}
+        if "code" not in columns:
+            c.execute("ALTER TABLE shop_catalog ADD COLUMN code TEXT")
+        if "description" not in columns:
+            c.execute("ALTER TABLE shop_catalog ADD COLUMN description TEXT DEFAULT ''")
+        if "is_secret" not in columns:
+            c.execute("ALTER TABLE shop_catalog ADD COLUMN is_secret INTEGER DEFAULT 0")
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS inventory (
                 user_id INTEGER NOT NULL,
                 item_code TEXT NOT NULL,
@@ -162,6 +200,25 @@ def init_db() -> None:
                 PRIMARY KEY (chat_id, user_id)
             )
             """
+        )
+        seed_items = []
+        idx = 1
+        for code, item in SHOP_ITEMS.items():
+            seed_items.append((idx, code, item["name"], item["type"], item["price"], item["desc"], 0))
+            idx += 1
+        for code, item in SECRET_ITEMS.items():
+            seed_items.append((idx, code, item["name"], item["type"], item["price"], item["desc"], 1))
+            idx += 1
+        c.executemany(
+            """INSERT INTO shop_catalog (id, code, name, type, price, description, is_secret)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(code) DO UPDATE SET
+                 name=excluded.name,
+                 type=excluded.type,
+                 price=excluded.price,
+                 description=excluded.description,
+                 is_secret=excluded.is_secret""",
+            seed_items,
         )
         conn.commit()
 
@@ -266,6 +323,36 @@ def inventory_slots_used(user_id: int) -> int:
         return c.execute("SELECT COUNT(*) FROM inventory WHERE user_id=? AND qty>0", (user_id,)).fetchone()[0]
 
 
+def get_luck_buff_until(user_id: int) -> Optional[datetime]:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT luck_buff_until FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row or not row[0]:
+            return None
+        return datetime.fromisoformat(row[0])
+
+
+def has_active_luck(user_id: int) -> bool:
+    until = get_luck_buff_until(user_id)
+    return bool(until and now_utc() < until)
+
+
+def roll_chest_tier(luck_active: bool) -> str:
+    rates = list(CHEST_RATES)
+    if luck_active:
+        rates = [
+            (tier, weight * 1.05 if tier in {"rare", "epic", "legend", "myth"} else weight)
+            for tier, weight in rates
+        ]
+    total = sum(weight for _, weight in rates)
+    r = random.uniform(0, total)
+    upto = 0.0
+    for tier, weight in rates:
+        upto += weight
+        if r <= upto:
+            return tier
+    return rates[0][0]
+
+
 def parse_target(update: Update, args: list[str]) -> Optional[int]:
     if update.message.reply_to_message:
         return update.message.reply_to_message.from_user.id
@@ -323,14 +410,17 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
-    buff = "Tidak ada"
+    buff_list = []
     debuff = "Tidak ada"
     if user.premium:
-        buff = "Premium: bonus EXP & reward"
-    if get_item_qty(user.user_id, "luck_potion") > 0:
-        pass
+        buff_list.append("Premium: bonus EXP & reward")
+    luck_until = get_luck_buff_until(user.user_id)
+    if luck_until and now_utc() < luck_until:
+        remaining = str(luck_until - now_utc()).split(".")[0]
+        buff_list.append(f"Lucky Potion +5% chest luck ({remaining})")
     if user.hp < int(user.hp_max * 0.2):
         debuff = "⚠️ HP kritis (<20%)"
+    buff = ", ".join(buff_list) if buff_list else "Tidak ada"
     text = f"HP : {user.hp}/{user.hp_max}\nArmor : {user.armor}\nBuff : {buff}\nDebuff : {debuff}"
     await update.message.reply_text(text)
     if user.hp < int(user.hp_max * 0.2):
@@ -359,29 +449,46 @@ async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
     lines = ["🛒 Shop:"]
     buttons = []
-    for code, item in SHOP_ITEMS.items():
-        price = discount_price(user, item['price'])
-        lines.append(f"- {item['name']} ({item['desc']}) | Harga {format_int(price)} | /buy {code}")
-        buttons.append([InlineKeyboardButton(f"Beli {item['name']} - {format_int(price)}", callback_data=f"buy:{code}")])
-    if user.level >= 5:
-        lines.append("\n🔐 Secret Shop terbuka:")
-        for code, item in SECRET_ITEMS.items():
-            price = discount_price(user, item['price'])
-            lines.append(f"- {item['name']} ({item['desc']}) | Harga {format_int(price)} | /buy {code}")
-            buttons.append([InlineKeyboardButton(f"Beli {item['name']} - {format_int(price)}", callback_data=f"buy:{code}")])
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        rows = c.execute(
+            """SELECT code, name, type, price, description, is_secret
+               FROM shop_catalog
+               ORDER BY is_secret ASC, id ASC"""
+        ).fetchall()
+    secret_printed = False
+    for code, name, _type, price_raw, desc, is_secret in rows:
+        if is_secret and user.level < 5:
+            continue
+        if is_secret and not secret_printed:
+            lines.append("\n🔐 Secret Shop terbuka:")
+            secret_printed = True
+        price = discount_price(user, price_raw)
+        lines.append(f"- {name} ({desc}) | Harga {format_int(price)} | /buy {code}")
+        buttons.append([InlineKeyboardButton(f"Beli {name} - {format_int(price)}", callback_data=f"buy:{code}")])
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def buy_item(user: UserData, code: str) -> str:
-    item = SHOP_ITEMS.get(code) or (SECRET_ITEMS.get(code) if user.level >= 5 else None)
-    if not item:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute(
+            "SELECT name, type, price, description, is_secret FROM shop_catalog WHERE code=?",
+            (code,),
+        ).fetchone()
+    if not row:
+        return "Kode item tidak ditemukan / belum terbuka."
+    name, item_type, base_price, _desc, is_secret = row
+    if is_secret and user.level < 5:
         return "Kode item tidak ditemukan / belum terbuka."
 
-    price = discount_price(user, item["price"])
+    item = SHOP_ITEMS.get(code) or SECRET_ITEMS.get(code)
+    if not item:
+        return "Item belum dipetakan ke gameplay."
+
+    price = discount_price(user, base_price)
     if user.cash < price:
         return "Cash kamu tidak cukup."
 
-    if item["type"] == "upgrade":
+    if item_type == "upgrade":
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
             exists = c.execute("SELECT 1 FROM bag_upgrades WHERE user_id=? AND item_code=?", (user.user_id, code)).fetchone()
             if exists:
@@ -389,7 +496,7 @@ async def buy_item(user: UserData, code: str) -> str:
             c.execute("INSERT INTO bag_upgrades (user_id, item_code) VALUES (?, ?)", (user.user_id, code))
             c.execute("UPDATE users SET cash=cash-?, inventory_capacity=inventory_capacity+? WHERE user_id=?", (price, item['capacity'], user.user_id))
             conn.commit()
-        return f"Berhasil beli {item['name']}. Kapasitas inventory +{item['capacity']}."
+        return f"Berhasil beli {name}. Kapasitas inventory +{item['capacity']}."
 
     if inventory_slots_used(user.user_id) >= user.inventory_capacity and get_item_qty(user.user_id, code) == 0:
         return "Inventory penuh. Upgrade tas dulu di shop."
@@ -397,7 +504,7 @@ async def buy_item(user: UserData, code: str) -> str:
     max_stack = item.get("max_stack", 999)
     current = get_item_qty(user.user_id, code)
     if current >= max_stack:
-        return f"Stack {item['name']} sudah maksimum ({max_stack})."
+        return f"Stack {name} sudah maksimum ({max_stack})."
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (price, user.user_id))
@@ -406,7 +513,7 @@ async def buy_item(user: UserData, code: str) -> str:
             (user.user_id, code),
         )
         conn.commit()
-    return f"Berhasil beli {item['name']}."
+    return f"Berhasil beli {name}."
 
 
 async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -455,7 +562,7 @@ async def cmd_use_pot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE users SET hp=MIN(hp+?, hp_max) WHERE user_id=?", (heal, user.user_id))
         conn.commit()
-    await update.message.reply_text(f"Kamu memakai Potion Merah. HP +{heal}% dari max.")
+    await update.message.reply_text(f"Kamu memakai Potion Merah. HP +{heal} (10% dari max HP {user.hp_max}).")
 
 
 async def cmd_use_armor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -546,7 +653,7 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: 
     last_field = "daily_last_claim" if typ == "daily" else "weekly_last_claim"
     cooldown = timedelta(seconds=DAILY_COOLDOWN if typ == "daily" else WEEKLY_COOLDOWN)
     base_cash, base_exp = (150, 50) if typ == "daily" else (500, 250)
-    token_add = 0 if typ == "daily" else 1
+    base_token = 0 if typ == "daily" else 1
 
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
         last = c.execute(f"SELECT {last_field} FROM users WHERE user_id=?", (user.user_id,)).fetchone()[0]
@@ -558,16 +665,27 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: 
         multi = 2 if user.premium else 1
         cash = base_cash * multi
         exp = base_exp * multi
+        token_add = base_token * multi
         chest_msg = ""
         if typ == "weekly":
-            chest = random.choice(["banana", "sandal", "luck_potion", "potion_red", "armor_item"])
-            add_item(user.user_id, chest, 1)
-            chest_msg = f"\n🎁 Chest random: {SHOP_ITEMS[chest]['name']}"
-        c.execute(f"UPDATE users SET {last_field}=?, cash=cash+?, token=token+? WHERE user_id=?", (now.isoformat(), cash, token_add * multi, user.user_id))
+            luck_active = has_active_luck(user.user_id)
+            chest_tier = roll_chest_tier(luck_active)
+            reward = CHEST_REWARDS[chest_tier]
+            cash += reward["cash"] * multi
+            token_bonus = random.randint(reward["token"][0], reward["token"][1]) * multi
+            token_add += token_bonus
+            got_items = []
+            for code in reward["items"]:
+                add_item(user.user_id, code, 1)
+                got_items.append(SHOP_ITEMS[code]["name"])
+            luck_note = " (Lucky Potion aktif)" if luck_active else ""
+            item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
+            chest_msg = f"\n🎁 Chest {chest_tier}{luck_note}: +{reward['cash'] * multi} cash, +{token_bonus} token{item_note}"
+        c.execute(f"UPDATE users SET {last_field}=?, cash=cash+?, token=token+? WHERE user_id=?", (now.isoformat(), cash, token_add, user.user_id))
         conn.commit()
     new_lvl, up = add_exp(user.user_id, exp)
     up_msg = f"\n⬆️ Level up ke {new_lvl}" if up else ""
-    await update.message.reply_text(f"Claim {typ} berhasil: +{cash} cash +{exp} exp +{token_add * (2 if user.premium else 1)} token{chest_msg}{up_msg}")
+    await update.message.reply_text(f"Claim {typ} berhasil: +{cash} cash +{exp} exp +{token_add} token{chest_msg}{up_msg}")
 
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):

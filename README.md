@@ -30,6 +30,7 @@ Script helper `db-check.js` sudah ditambahkan untuk test koneksi PostgreSQL:
 ```bash
 npm install
 npm run db:check
+npm run migrate
 ```
 
 Isi `.env` minimal dengan:

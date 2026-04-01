@@ -4,7 +4,8 @@
   "private": true,
   "description": "DB connectivity check helper",
   "scripts": {
-    "db:check": "node db-check.js"
+    "db:check": "node db-check.js",
+    "migrate": "node migrate.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

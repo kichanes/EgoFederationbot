@@ -4,7 +4,7 @@
   "private": true,
   "description": "DB connectivity check helper",
   "scripts": {
-    "db:check": "node db-check.js",
+    "start": "node bot.js",
     "migrate": "node migrate.js"
   },
   "dependencies": {

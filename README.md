@@ -211,3 +211,25 @@ Index disarankan: `{ chat_id: 1, user_id: 1 }` unik.
 | `is_secret` | `Boolean` | Item secret shop atau bukan |
 
 Index disarankan: `{ code: 1 }` unik.
+
+### Mongoose Schema Siap Pakai
+
+File schema sudah disediakan di folder `models/`:
+
+- `models/User.js`
+- `models/Inventory.js`
+- `models/BagUpgrade.js`
+- `models/ExpCooldown.js`
+- `models/ChatUser.js`
+- `models/ShopCatalog.js`
+- `models/index.js` (helper koneksi + export semua model)
+
+Contoh pakai:
+
+```js
+const { connectMongo, User, ShopCatalog } = require('./models');
+
+await connectMongo(process.env.MONGODB_URI, process.env.MONGODB_DB);
+const me = await User.findById(5258274019);
+const items = await ShopCatalog.find({ is_secret: false });
+```

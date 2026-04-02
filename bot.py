@@ -37,7 +37,7 @@ MAX_ARMOR = 100
 DAILY_COOLDOWN = 24 * 3600
 WEEKLY_COOLDOWN = 7 * 24 * 3600
 KP_DAMAGE_RANGE = (5, 10)
-SEMAK_DAMAGE_RANGE = (7, 12)
+SEMAK_DAMAGE_RANGE = (5, 10)
 DOR_COOLDOWN_SECONDS = 60
 
 ROLE_RANGES = [
@@ -54,7 +54,7 @@ ROLE_RANGES = [
 
 SHOP_ITEMS = {
     "banana": {"name": "🍌 Kulit Pisang", "price": 200, "type": "consumable", "desc": "Damage 5-10", "max_stack": 999},
-    "sandal": {"name": "🩴 Sandal Emak", "price": 2500, "type": "consumable", "desc": "Damage 7-12", "max_stack": 999},
+    "sandal": {"name": "🩴 Sandal Emak", "price": 200, "type": "consumable", "desc": "Damage 5-10", "max_stack": 999},
     "ramal_scroll": {"name": "🔮 Ramal", "price": 200, "type": "consumable", "desc": "Sekali pakai untuk intip inventory target (/ramal)", "max_stack": 99},
     "luck_potion": {"name": "🧪 Lucky Potion", "price": 5000, "type": "consumable", "desc": "Buff luck +5% (pakai /lp)", "max_stack": 99},
     "luck_potion_med": {"name": "⚗️ Luck Potion Med", "price": 7500, "type": "consumable", "desc": "Buff luck +15% (pakai /lpm)", "max_stack": 99},
@@ -1658,7 +1658,13 @@ async def cmd_addexp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     lvl, _ = add_exp(uid, amt)
-    await update.message.reply_text(f"EXP ditambahkan. Level sekarang: {lvl}")
+    target = get_user(uid)
+    if not target:
+        await update.message.reply_text(f"EXP ditambahkan. Level sekarang: {lvl}")
+        return
+    await update.message.reply_text(
+        f"EXP ditambahkan. Level sekarang: {lvl}. EXP: {target.exp}/{exp_needed(target.level)}"
+    )
 
 
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):

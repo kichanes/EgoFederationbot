@@ -55,7 +55,10 @@ ROLE_RANGES = [
 SHOP_ITEMS = {
     "banana": {"name": "🍌 Kulit Pisang", "price": 200, "type": "consumable", "desc": "Damage 5-10", "max_stack": 999},
     "sandal": {"name": "🩴 Sandal Emak", "price": 2500, "type": "consumable", "desc": "Damage 7-12", "max_stack": 999},
+    "ramal_scroll": {"name": "🔮 Ramal", "price": 200, "type": "consumable", "desc": "Sekali pakai untuk intip inventory target (/ramal)", "max_stack": 99},
     "luck_potion": {"name": "🧪 Lucky Potion", "price": 5000, "type": "consumable", "desc": "Buff luck +5% (pakai /lp)", "max_stack": 99},
+    "luck_potion_med": {"name": "⚗️ Luck Potion Med", "price": 7500, "type": "consumable", "desc": "Buff luck +15% (pakai /lpm)", "max_stack": 99},
+    "random_chest": {"name": "🎁 Random Chest", "price": 1000, "type": "consumable", "desc": "Buka chest acak sesuai rate weekly", "max_stack": 99},
     "shield_3": {"name": "🛡️ Perisai Kelas III", "price": 2000, "type": "consumable", "desc": "Shield level III, aktif otomatis saat kena /dor", "max_stack": 99},
     "shield_2": {"name": "🛡️ Perisai Kelas II", "price": 4000, "type": "consumable", "desc": "Shield level II, aktif otomatis saat kena /dor", "max_stack": 99},
     "shield_1": {"name": "🛡️ Perisai Kelas I", "price": 5000, "type": "consumable", "desc": "Shield level I, aktif otomatis saat kena /dor", "max_stack": 99},
@@ -63,6 +66,7 @@ SHOP_ITEMS = {
     "pistol_2": {"name": "🔫 Pistol Kelas II", "price": 7500, "type": "consumable", "desc": "Damage 30-40, curi cash 1500 (exp +200)", "max_stack": 99},
     "pistol_1": {"name": "🔫 Pistol Kelas I", "price": 10000, "type": "consumable", "desc": "Damage 50-70, curi cash 2500 (exp +300)", "max_stack": 99},
     "potion_red": {"name": "❤️ Potion Merah", "price": 100, "type": "consumable", "desc": "Tambah HP 10% (pakai /pot)", "max_stack": 99},
+    "potion_red_big": {"name": "💖 Potion Merah Besar", "price": 1000, "type": "consumable", "desc": "Pulihkan HP 100% (pakai /potbig)", "max_stack": 99},
     "armor_item": {"name": "🦺 Armor", "price": 5000, "type": "consumable", "desc": "Tambah armor +100 (pakai /armor)", "max_stack": 99},
     "bag_small": {"name": "👛 Tas Kecil", "price": 5000, "type": "upgrade", "desc": "+3 slot", "capacity": 3},
     "bag_tenun": {"name": "🛍 Tas Tenun", "price": 10000, "type": "upgrade", "desc": "+5 slot", "capacity": 5},
@@ -227,6 +231,7 @@ def init_db() -> None:
                 daily_last_claim TEXT,
                 weekly_last_claim TEXT,
                 luck_buff_until TEXT,
+                luck_buff_rate INTEGER DEFAULT 0,
                 premium_until TEXT
             )
             """
@@ -238,6 +243,8 @@ def init_db() -> None:
             c.execute("ALTER TABLE users ADD COLUMN bank_cash INTEGER DEFAULT 0")
         if "radiation_until" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN radiation_until TEXT")
+        if "luck_buff_rate" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN luck_buff_rate INTEGER DEFAULT 0")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -488,6 +495,17 @@ def has_active_luck(user_id: int) -> bool:
     return bool(until and now_utc() < until)
 
 
+def get_luck_buff_rate(user_id: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT luck_buff_until, luck_buff_rate FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row or not row[0]:
+            return 0
+        until = datetime.fromisoformat(row[0])
+        if now_utc() >= until:
+            return 0
+        return row[1] or 0
+
+
 def get_premium_until(user_id: int) -> Optional[datetime]:
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
         row = c.execute("SELECT premium_until FROM users WHERE user_id=?", (user_id,)).fetchone()
@@ -503,11 +521,12 @@ def is_premium_active(user_id: int) -> bool:
     return False
 
 
-def roll_chest_tier(luck_active: bool) -> str:
+def roll_chest_tier(luck_bonus_percent: int = 0) -> str:
     rates = list(CHEST_RATES)
-    if luck_active:
+    if luck_bonus_percent > 0:
+        factor = 1 + (luck_bonus_percent / 100)
         rates = [
-            (tier, weight * 1.05 if tier in {"rare", "epic", "legend", "myth"} else weight)
+            (tier, weight * factor if tier in {"rare", "epic", "legend", "myth"} else weight)
             for tier, weight in rates
         ]
     total = sum(weight for _, weight in rates)
@@ -601,7 +620,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Command User\n"
-        "/start\n/p atau /profile (bisa /p @username atau reply)\n/status\n/inv\n/shop\n/secretshop atau /ss\n/buy <kode_item>\n/open\n/pot\n/lp\n"
+        "/start\n/p atau /profile (bisa /p @username atau reply)\n/status\n/inv\n/shop\n/secretshop atau /ss\n/buy <kode_item>\n/open\n/pot\n/potbig\n/lp\n/lpm\n/ramal <id/@username>\n"
         "/dor <id/@username> atau reply lalu /dor\n/aim <id/@username> atau reply lalu /aim (owner only)\n"
         "/bom <id/@username>\n/piw <id/@username>\n/dhuar\n"
         "/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
@@ -661,7 +680,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     luck_until = get_luck_buff_until(user.user_id)
     if luck_until and now_utc() < luck_until:
         remaining = str(luck_until - now_utc()).split(".")[0]
-        buff_list.append(f"Lucky Potion +5% chest luck ({remaining})")
+        buff_list.append(f"Lucky buff +{get_luck_buff_rate(user.user_id)}% chest luck ({remaining})")
     if get_item_qty(user.user_id, "bomb_defuser") > 0:
         buff_list.append("Penjinak Bom siap")
     if get_item_qty(user.user_id, "armor_plus") > 0:
@@ -715,7 +734,7 @@ def fetch_shop_rows(user: UserData):
             """SELECT code, name, type, price, description, is_secret
                FROM shop_catalog
                WHERE is_secret=0
-               ORDER BY id ASC"""
+               ORDER BY type ASC, id ASC"""
         ).fetchall()
     return rows
 
@@ -729,15 +748,15 @@ async def send_shop_page(update: Update, user: UserData, page: int, from_callbac
     chunk = rows[start:start + per_page]
 
     lines = [f"🛒 Shop (Page {page + 1}/{total_pages}):"]
-    for code, name, _type, price_raw, _desc, is_secret in chunk:
+    for code, name, item_type, price_raw, desc, is_secret in chunk:
         tag = " [Secret]" if is_secret else ""
         item = SHOP_ITEMS.get(code) or SECRET_ITEMS.get(code) or {}
         token_price = item.get("token_price")
         if is_secret and token_price is not None:
-            lines.append(f"- {name}{tag} | Harga {token_price} token")
+            lines.append(f"- {name}{tag} | {item_type} | Harga {token_price} token\n  ↳ {desc}")
         else:
             price = discount_price(user, price_raw)
-            lines.append(f"- {name}{tag} | Harga {format_int(price)}")
+            lines.append(f"- {name}{tag} | {item_type} | Harga {format_int(price)}\n  ↳ {desc}")
 
     buttons = []
     for code, name, _type, price_raw, _desc, is_secret in chunk:
@@ -817,6 +836,26 @@ async def buy_item(user: UserData, code: str) -> str:
             )
             conn.commit()
         return f"Berhasil beli 🦺 Armor. Armor diisi ulang ke {MAX_ARMOR}/{MAX_ARMOR}."
+
+    if code == "random_chest":
+        luck_rate = get_luck_buff_rate(user.user_id)
+        chest_tier = roll_chest_tier(luck_rate)
+        reward = CHEST_REWARDS[chest_tier]
+        token_bonus = random.randint(reward["token"][0], reward["token"][1])
+        got_items = []
+        for item_code in reward["items"]:
+            add_item(user.user_id, item_code, 1)
+            got_items.append(item_name(item_code))
+        bonus_awm = reward.get("bonus_awm_chance")
+        if bonus_awm and random.random() <= bonus_awm:
+            add_item(user.user_id, "awm_item", 1)
+            got_items.append(item_name("awm_item"))
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE users SET cash=cash-?, cash=cash+?, token=token+? WHERE user_id=?", (price, reward["cash"], token_bonus, user.user_id))
+            conn.commit()
+        luck_note = f" (Lucky +{luck_rate}% aktif)" if luck_rate > 0 else ""
+        item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
+        return f"Berhasil beli 🎁 Random Chest dan langsung dibuka!\nChest {chest_tier}{luck_note}: +{reward['cash']} cash, +{token_bonus} token{item_note}"
 
     if inventory_slots_used(user.user_id) >= user.inventory_capacity and get_item_qty(user.user_id, code) == 0:
         return "Inventory penuh. Upgrade tas dulu di shop."
@@ -1112,6 +1151,39 @@ async def cmd_use_pot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Kamu memakai Potion Merah. HP +{heal} (10% dari max HP {user.hp_max}).")
 
 
+async def cmd_use_big_pot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if not consume_item(user.user_id, "potion_red_big"):
+        await update.message.reply_text("Kamu tidak punya Potion Merah Besar.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET hp=hp_max WHERE user_id=?", (user.user_id,))
+        conn.commit()
+    await update.message.reply_text("💖 Potion Merah Besar dipakai. HP pulih 100%.")
+
+
+async def cmd_ramal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if not consume_item(user.user_id, "ramal_scroll"):
+        await update.message.reply_text("Kamu butuh 🔮 Ramal untuk mengintip inventory target.")
+        return
+    target_id = parse_target(update, context.args)
+    target = get_user(target_id) if target_id else None
+    if not target:
+        add_item(user.user_id, "ramal_scroll", 1)
+        await update.message.reply_text("Target tidak valid. Item Ramal dikembalikan.")
+        return
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        rows = c.execute("SELECT item_code, qty FROM inventory WHERE user_id=? AND qty>0 ORDER BY item_code", (target.user_id,)).fetchall()
+    lines = [f"🔮 Hasil ramal inventory {user_tag(target.user_id)}:"]
+    if not rows:
+        lines.append("- Kosong")
+    else:
+        for code, qty in rows:
+            lines.append(f"- {item_name(code)} x{qty}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_use_armor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
     if not consume_item(user.user_id, "armor_item"):
@@ -1130,9 +1202,21 @@ async def cmd_use_lucky(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     until = now_utc() + timedelta(minutes=60)
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET luck_buff_until=? WHERE user_id=?", (until.isoformat(), user.user_id))
+        conn.execute("UPDATE users SET luck_buff_until=?, luck_buff_rate=5 WHERE user_id=?", (until.isoformat(), user.user_id))
         conn.commit()
     await update.message.reply_text("Buff luck +5% aktif selama 60 menit.")
+
+
+async def cmd_use_lucky_med(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if not consume_item(user.user_id, "luck_potion_med"):
+        await update.message.reply_text("Kamu tidak punya Luck Potion Med.")
+        return
+    until = now_utc() + timedelta(minutes=60)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET luck_buff_until=?, luck_buff_rate=15 WHERE user_id=?", (until.isoformat(), user.user_id))
+        conn.commit()
+    await update.message.reply_text("Buff luck +15% aktif selama 60 menit.")
 
 
 def apply_damage(target_id: int, dmg: int) -> Tuple[int, int, int]:
@@ -1256,8 +1340,8 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: 
         token_add = base_token * multi
         chest_msg = ""
         if typ == "weekly":
-            luck_active = has_active_luck(user.user_id)
-            chest_tier = roll_chest_tier(luck_active)
+            luck_rate = get_luck_buff_rate(user.user_id)
+            chest_tier = roll_chest_tier(luck_rate)
             reward = CHEST_REWARDS[chest_tier]
             cash += reward["cash"] * multi
             token_bonus = random.randint(reward["token"][0], reward["token"][1]) * multi
@@ -1270,7 +1354,7 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: 
             if bonus_awm and random.random() <= bonus_awm:
                 add_item(user.user_id, "awm_item", 1)
                 got_items.append(SECRET_ITEMS["awm_item"]["name"])
-            luck_note = " (Lucky Potion aktif)" if luck_active else ""
+            luck_note = f" (Lucky +{luck_rate}% aktif)" if luck_rate > 0 else ""
             item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
             chest_msg = f"\n🎁 Chest {chest_tier}{luck_note}: +{reward['cash'] * multi} cash, +{token_bonus} token{item_note}"
         c.execute(f"UPDATE users SET {last_field}=?, cash=cash+?, token=token+? WHERE user_id=?", (now.isoformat(), cash, token_add, user.user_id))
@@ -1684,8 +1768,11 @@ def main():
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler(["deposit", "dp"], cmd_deposit))
     app.add_handler(CommandHandler(["withdraw", "wd"], cmd_withdraw))
+    app.add_handler(CommandHandler("ramal", cmd_ramal))
     app.add_handler(CommandHandler("pot", cmd_use_pot))
+    app.add_handler(CommandHandler("potbig", cmd_use_big_pot))
     app.add_handler(CommandHandler("lp", cmd_use_lucky))
+    app.add_handler(CommandHandler("lpm", cmd_use_lucky_med))
     app.add_handler(CommandHandler("dor", cmd_dor))
     app.add_handler(CommandHandler("bom", cmd_bom))
     app.add_handler(CommandHandler("piw", cmd_piw))

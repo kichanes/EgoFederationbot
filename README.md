@@ -53,7 +53,10 @@ PGSSL=false
 - `/buy <kode_item>`
 - `/open`
 - `/pot`
+- `/potbig`
 - `/lp`
+- `/lpm`
+- `/ramal <id/@username>`
 - `/dor <id/@username>` atau reply lalu `/dor`
 - `/bom <id/@username>`
 - `/piw <id/@username>`
@@ -100,6 +103,7 @@ PGSSL=false
   - 4 slot item per page
   - 1 slot bubble `Next` untuk pindah ke page berikutnya.
 - Secret shop terpisah dari shop biasa.
+- Shop biasa punya item tambahan: 🎁 Random Chest, 💖 Potion Merah Besar, ⚗️ Luck Potion Med, 🔮 Ramal.
 - Secret shop terbuka saat level >= 5.
 - `/help` dan `/ss` diarahkan ke chat pribadi bot.
 - `/bank` diarahkan ke chat pribadi bot.

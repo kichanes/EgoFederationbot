@@ -163,12 +163,11 @@ class UserData:
 
 
 KP_QUOTES = [
-    "Anying sia!",
-    "Goblog teh!",
-    "Mantog sia!",
-    "Ulin teu apal waktu, mantog!",
-    "Nyiaring nyiar pi bangusun!",
-    "Aing lak anjing sia, bangung teh sia rewot jeung aing!",
+    "Matane, cok!",
+    "Huelahdalah, opo iki cok!",
+    "Cangkeme o asu",
+    "Lah, iki opo sih cok!",
+    "Naon si anying!",
 ]
 
 SEMAK_QUOTES = [

@@ -838,7 +838,13 @@ async def buy_item(user: UserData, code: str) -> str:
             if exists:
                 return "Upgrade tas ini sudah pernah dibeli."
             c.execute("INSERT INTO bag_upgrades (user_id, item_code) VALUES (?, ?)", (user.user_id, code))
-            c.execute("UPDATE users SET cash=cash-?, inventory_capacity=inventory_capacity+? WHERE user_id=?", (price, item['capacity'], user.user_id))
+            updated = c.execute(
+                "UPDATE users SET cash=cash-?, inventory_capacity=inventory_capacity+? WHERE user_id=? AND cash>=?",
+                (price, item['capacity'], user.user_id, price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                return "Cash kamu tidak cukup."
             conn.commit()
         return f"Berhasil beli {name}. Kapasitas inventory +{item['capacity']}."
 
@@ -848,10 +854,13 @@ async def buy_item(user: UserData, code: str) -> str:
             armor_now = c.execute("SELECT armor FROM users WHERE user_id=?", (user.user_id,)).fetchone()[0]
             if armor_now >= MAX_ARMOR:
                 return "Armor kamu masih penuh (100/100), tidak bisa beli armor lagi sekarang."
-            conn.execute(
-                "UPDATE users SET cash=cash-?, armor=? WHERE user_id=?",
-                (price, MAX_ARMOR, user.user_id),
+            updated = conn.execute(
+                "UPDATE users SET cash=cash-?, armor=? WHERE user_id=? AND cash>=?",
+                (price, MAX_ARMOR, user.user_id, price),
             )
+            if updated.rowcount == 0:
+                conn.rollback()
+                return "Cash kamu tidak cukup."
             conn.commit()
         return f"Berhasil beli 🦺 Armor. Armor diisi ulang ke {MAX_ARMOR}/{MAX_ARMOR}."
 
@@ -881,18 +890,20 @@ async def buy_item(user: UserData, code: str) -> str:
             add_item(user.user_id, "awm_item", 1)
             got_items.append(item_name("awm_item"))
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE users
-                SET cash=cash-?,
-                    cash=cash+?,
+                SET cash=cash-?+?,
                     token=token+?,
                     random_chest_buy_count=?,
                     random_chest_buy_date=?
-                WHERE user_id=?
+                WHERE user_id=? AND cash>=?
                 """,
-                (price, reward["cash"], token_bonus, daily_count + 1, today, user.user_id),
+                (price, reward["cash"], token_bonus, daily_count + 1, today, user.user_id, price),
             )
+            if updated.rowcount == 0:
+                conn.rollback()
+                return "Cash kamu tidak cukup."
             conn.commit()
         luck_note = f" (Lucky +{luck_rate}% aktif)" if luck_rate > 0 else ""
         item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
@@ -908,10 +919,22 @@ async def buy_item(user: UserData, code: str) -> str:
 
     with sqlite3.connect(DB_PATH) as conn:
         if is_secret and token_price is not None:
-            conn.execute("UPDATE users SET token=token-? WHERE user_id=?", (token_price, user.user_id))
+            updated = conn.execute(
+                "UPDATE users SET token=token-? WHERE user_id=? AND token>=?",
+                (token_price, user.user_id, token_price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                return "Token kamu tidak cukup."
         else:
             price = discount_price(user, base_price)
-            conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (price, user.user_id))
+            updated = conn.execute(
+                "UPDATE users SET cash=cash-? WHERE user_id=? AND cash>=?",
+                (price, user.user_id, price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                return "Cash kamu tidak cukup."
         conn.execute(
             "INSERT INTO inventory (user_id, item_code, qty) VALUES (?, ?, 1) ON CONFLICT(user_id, item_code) DO UPDATE SET qty=qty+1",
             (user.user_id, code),

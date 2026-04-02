@@ -793,7 +793,8 @@ async def passive_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = now_utc()
         if row and row[0] and now - datetime.fromisoformat(row[0]) < timedelta(seconds=EXP_COOLDOWN_SECONDS):
             return
-        gain = random.randint(EXP_MIN, EXP_MAX) * (2 if is_premium_active(user.user_id) else 1)
+        # EXP chat grup: 1 chat = random 5-15 EXP, cooldown 5 menit
+        gain = random.randint(EXP_MIN, EXP_MAX)
         c.execute("INSERT INTO exp_cooldown (user_id, last_gain) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET last_gain=excluded.last_gain", (user.user_id, now.isoformat()))
         conn.commit()
     lvl, up = add_exp(user.user_id, gain)

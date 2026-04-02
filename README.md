@@ -84,14 +84,14 @@ PGSSL=false
 ## Catatan Fitur
 
 - Profile: nama, username, id, cash, level, role, register date, time WIB.
-- EXP grup otomatis: 5-15 tiap 5 menit (premium double).
+- EXP grup otomatis: 1 chat = random 5-15 EXP, cooldown 5 menit.
 - Inventory default 5 slot + upgrade tas one-time per jenis.
 - HP/Armor + alert otomatis saat HP < 20%.
 - Shop menampilkan list + bubble tombol beli.
 - Secret shop terbuka saat level >= 5.
 - Daily reward: +150 cash +50 exp (premium double).
 - Weekly reward: +500 cash +250 exp +1 token +1 chest random (premium double reward/token).
-- Premium privilege: double EXP, double daily/weekly reward, diskon shop 30%.
+- Premium privilege: double daily/weekly reward, diskon shop 30%.
 - Lucky Potion (`/lp`) aktif 60 menit dan meningkatkan peluang chest tier bagus saat claim weekly.
 - Daftar shop diambil dari tabel `shop_catalog` (bukan hardcoded output saja).
 

@@ -184,6 +184,10 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def today_wib_str() -> str:
+    return datetime.now(WIB).date().isoformat()
+
+
 def format_int(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
@@ -234,7 +238,9 @@ def init_db() -> None:
                 luck_buff_until TEXT,
                 luck_buff_rate INTEGER DEFAULT 0,
                 premium_until TEXT,
-                role_locked INTEGER DEFAULT 0
+                role_locked INTEGER DEFAULT 0,
+                random_chest_buy_count INTEGER DEFAULT 0,
+                random_chest_buy_date TEXT
             )
             """
         )
@@ -249,6 +255,10 @@ def init_db() -> None:
             c.execute("ALTER TABLE users ADD COLUMN luck_buff_rate INTEGER DEFAULT 0")
         if "role_locked" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN role_locked INTEGER DEFAULT 0")
+        if "random_chest_buy_count" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN random_chest_buy_count INTEGER DEFAULT 0")
+        if "random_chest_buy_date" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN random_chest_buy_date TEXT")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -847,6 +857,18 @@ async def buy_item(user: UserData, code: str) -> str:
         return f"Berhasil beli 🦺 Armor. Armor diisi ulang ke {MAX_ARMOR}/{MAX_ARMOR}."
 
     if code == "random_chest":
+        today = today_wib_str()
+        with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+            count_row = c.execute(
+                "SELECT random_chest_buy_count, random_chest_buy_date FROM users WHERE user_id=?",
+                (user.user_id,),
+            ).fetchone()
+            daily_count, last_buy_date = count_row if count_row else (0, None)
+            if last_buy_date != today:
+                daily_count = 0
+            if daily_count >= 5:
+                return "⚠️ Random Chest hanya bisa dibeli 5 kali per hari. Coba lagi besok."
+
         luck_rate = get_luck_buff_rate(user.user_id)
         chest_tier = roll_chest_tier(luck_rate)
         reward = CHEST_REWARDS[chest_tier]
@@ -860,7 +882,18 @@ async def buy_item(user: UserData, code: str) -> str:
             add_item(user.user_id, "awm_item", 1)
             got_items.append(item_name("awm_item"))
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("UPDATE users SET cash=cash-?, cash=cash+?, token=token+? WHERE user_id=?", (price, reward["cash"], token_bonus, user.user_id))
+            conn.execute(
+                """
+                UPDATE users
+                SET cash=cash-?,
+                    cash=cash+?,
+                    token=token+?,
+                    random_chest_buy_count=?,
+                    random_chest_buy_date=?
+                WHERE user_id=?
+                """,
+                (price, reward["cash"], token_bonus, daily_count + 1, today, user.user_id),
+            )
             conn.commit()
         luck_note = f" (Lucky +{luck_rate}% aktif)" if luck_rate > 0 else ""
         item_note = f" | Item: {', '.join(got_items)}" if got_items else ""

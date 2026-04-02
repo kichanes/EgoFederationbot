@@ -49,10 +49,15 @@ PGSSL=false
 - `/status`
 - `/inv`
 - `/shop`
+- `/secretshop` atau `/ss`
 - `/buy <kode_item>`
+- `/open`
 - `/pot`
 - `/lp`
 - `/dor <id/@username>` atau reply lalu `/dor`
+- `/bom <id/@username>`
+- `/piw <id/@username>`
+- `/dhuar`
 - `/kp <id/@username>` atau reply lalu `/kp`
 - `/semak <id/@username>` atau reply lalu `/semak`
 - `/transfer <id_tujuan> <jumlah>`
@@ -75,6 +80,10 @@ PGSSL=false
 - `/setlevel` atau `/sl <id/@username> <level>`
 - `/defaultlevel` atau `/dl <id/@username>`
 - `/addexp` atau `/ae <id/@username> <jumlah_exp>`
+- `/mute <id/@username> [durasi_menit]` atau reply command (default 3 menit)
+- `/unmute <id/@username>` atau reply command
+- `/sniper` (memberikan sniper permanen ke owner)
+- `/aim <id/@username>` atau reply command (owner only)
 
 ## Catatan Fitur
 
@@ -86,6 +95,8 @@ PGSSL=false
   - 4 slot item per page
   - 1 slot bubble `Next` untuk pindah ke page berikutnya.
 - Secret shop terbuka saat level >= 5.
+- Item secret shop dibeli menggunakan token.
+- Tambahan secret shop: Peti Rahasia, Bom, AWM, Nuklir, Anti Radiasi, Penjinak Bom, Armor Plus.
 - Daily reward: +150 cash +50 exp (premium double).
 - Weekly reward: +500 cash +250 exp +1 token +1 chest random (premium double reward/token).
 - Premium privilege: double daily/weekly reward, diskon shop 30%.

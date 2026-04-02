@@ -77,6 +77,7 @@ PGSSL=false
 
 - `/addcoin` atau `/ac <id_user> <jumlah>`
 - `/addtoken` atau `/at <id/@username> <jumlah>`
+- `/heal <id/@username>` atau reply command (owner only)
 - `/premiumuser` atau `/pu <id/@username> <durasi>`
   - durasi: `1m`, `3m`, `6m`, `12m`, atau `1y`
 - `/setrole` atau `/sr <id/@username> <role>`
@@ -98,6 +99,7 @@ PGSSL=false
 - Shop menampilkan list sederhana (nama item + harga) dengan bubble:
   - 4 slot item per page
   - 1 slot bubble `Next` untuk pindah ke page berikutnya.
+- Secret shop terpisah dari shop biasa.
 - Secret shop terbuka saat level >= 5.
 - `/help` dan `/ss` diarahkan ke chat pribadi bot.
 - `/bank` diarahkan ke chat pribadi bot.

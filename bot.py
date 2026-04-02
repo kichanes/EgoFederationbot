@@ -72,9 +72,9 @@ SHOP_ITEMS = {
 }
 
 PISTOL_CONFIG = {
-    3: {"code": "pistol_3", "name": "🔫 Pistol Kelas III", "damage": (10, 20), "steal": 500, "exp": 100},
-    2: {"code": "pistol_2", "name": "🔫 Pistol Kelas II", "damage": (30, 40), "steal": 1500, "exp": 200},
-    1: {"code": "pistol_1", "name": "🔫 Pistol Kelas I", "damage": (50, 70), "steal": 2500, "exp": 300},
+    3: {"code": "pistol_3", "name": "🔫 Pistol Kelas III", "damage": (10, 20), "steal": (100, 500), "exp": 100},
+    2: {"code": "pistol_2", "name": "🔫 Pistol Kelas II", "damage": (30, 40), "steal": (750, 1500), "exp": 200},
+    1: {"code": "pistol_1", "name": "🔫 Pistol Kelas I", "damage": (50, 70), "steal": (1000, 2500), "exp": 300},
 }
 
 SHIELD_CONFIG = {
@@ -223,6 +223,7 @@ def init_db() -> None:
                 token INTEGER DEFAULT 0,
                 premium INTEGER DEFAULT 0,
                 bank_cash INTEGER DEFAULT 0,
+                radiation_until TEXT,
                 daily_last_claim TEXT,
                 weekly_last_claim TEXT,
                 luck_buff_until TEXT,
@@ -235,6 +236,8 @@ def init_db() -> None:
             c.execute("ALTER TABLE users ADD COLUMN premium_until TEXT")
         if "bank_cash" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN bank_cash INTEGER DEFAULT 0")
+        if "radiation_until" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN radiation_until TEXT")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -628,6 +631,11 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_chat_member(update.effective_chat.id, requester.user_id)
     dt = datetime.fromisoformat(target.register_at).astimezone(WIB)
     now = datetime.now(WIB)
+    premium_until = get_premium_until(target.user_id)
+    premium_text = "Tidak aktif"
+    if premium_until and now_utc() < premium_until:
+        remain = str(premium_until - now_utc()).split(".")[0]
+        premium_text = f"Aktif ({remain})"
     msg = (
         f"Nama : {target.name}\n"
         f"Username : {target.username}\n"
@@ -635,6 +643,7 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Cash : {format_int(target.cash)}\n"
         f"Level : {target.level} ({target.exp}/{exp_needed(target.level)})\n"
         f"Role : {target.role or '-'}\n"
+        f"Premium : {premium_text}\n"
         f"Register Date : _{dt.strftime('%Y-%m-%d')}_\n"
         f"Time : _{now.strftime('%H:%M:%S WIB')}_"
     )
@@ -653,6 +662,18 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if luck_until and now_utc() < luck_until:
         remaining = str(luck_until - now_utc()).split(".")[0]
         buff_list.append(f"Lucky Potion +5% chest luck ({remaining})")
+    if get_item_qty(user.user_id, "bomb_defuser") > 0:
+        buff_list.append("Penjinak Bom siap")
+    if get_item_qty(user.user_id, "armor_plus") > 0:
+        buff_list.append("Armor Plus siap")
+    if get_item_qty(user.user_id, "anti_radiation") > 0:
+        buff_list.append("Anti Radiasi siap")
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        rad = c.execute("SELECT radiation_until FROM users WHERE user_id=?", (user.user_id,)).fetchone()[0]
+    if rad:
+        rad_until = datetime.fromisoformat(rad)
+        if now_utc() < rad_until:
+            debuff = f"☢️ Radiasi aktif ({str(rad_until - now_utc()).split('.')[0]})"
     if user.hp < int(user.hp_max * 0.2):
         debuff = "⚠️ HP kritis (<20%)"
     buff = ", ".join(buff_list) if buff_list else "Tidak ada"
@@ -669,7 +690,6 @@ async def cmd_inv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         f"🎫 Token : {format_int(user.token)}",
         f"🎒 Inventory ({inventory_slots_used(user.user_id)}/{user.inventory_capacity} slot):",
-        "📦 Other",
     ]
     if not rows:
         lines.append("- Kosong")
@@ -694,9 +714,10 @@ def fetch_shop_rows(user: UserData):
         rows = c.execute(
             """SELECT code, name, type, price, description, is_secret
                FROM shop_catalog
-               ORDER BY is_secret ASC, id ASC"""
+               WHERE is_secret=0
+               ORDER BY id ASC"""
         ).fetchall()
-    return [r for r in rows if not r[5] or user.level >= 5]
+    return rows
 
 
 async def send_shop_page(update: Update, user: UserData, page: int, from_callback: bool = False):
@@ -972,6 +993,10 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def apply_nuke_debuff(target_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    until = now_utc() + timedelta(seconds=10)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET radiation_until=? WHERE user_id=?", (until.isoformat(), target_id))
+        conn.commit()
     for _ in range(10):
         await asyncio.sleep(1)
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
@@ -986,11 +1011,11 @@ async def apply_nuke_debuff(target_id: int, chat_id: int, context: ContextTypes.
             c.execute("UPDATE users SET hp=? WHERE user_id=?", (hp, target_id))
             conn.commit()
             if hp <= 0:
-                try:
-                    await context.bot.send_message(chat_id, f"☢️ User {user_tag(target_id)} tumbang karena radiasi nuklir.")
-                except Exception:
-                    pass
+                await handle_death_background(chat_id, target_id, context, "Radiasi nuklir")
                 return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET radiation_until=NULL WHERE user_id=?", (target_id,))
+        conn.commit()
 
 
 async def cmd_bom(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1056,7 +1081,7 @@ async def cmd_dhuar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Kamu tidak punya ☢️ Nuklir.")
         return
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
-        rows = c.execute("SELECT user_id FROM chat_users WHERE chat_id=? AND user_id!=? LIMIT 20", (update.effective_chat.id, user.user_id)).fetchall()
+        rows = c.execute("SELECT user_id FROM chat_users WHERE chat_id=? LIMIT 20", (update.effective_chat.id,)).fetchall()
     target_ids = [r[0] for r in rows]
     random.shuffle(target_ids)
     target_ids = target_ids[:10]
@@ -1184,7 +1209,7 @@ async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     consume_item(user.user_id, pistol["code"])
 
     raw_damage = random.randint(pistol["damage"][0], pistol["damage"][1])
-    raw_steal = pistol["steal"]
+    raw_steal = random.randint(pistol["steal"][0], pistol["steal"][1])
     shield_class = get_best_shield_class(target_id)
     shield_note = "Target tidak punya perisai."
     if shield_class:
@@ -1388,6 +1413,24 @@ async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+async def handle_death_background(chat_id: int, target_id: int, context: ContextTypes.DEFAULT_TYPE, cause: str):
+    tag = user_tag(target_id)
+    try:
+        await context.bot.send_message(chat_id, f"☠️ User {tag} telah mati. Penyebab: {cause}.")
+        until = now_utc() + timedelta(minutes=3)
+        perms = ChatPermissions(can_send_messages=False)
+        await context.bot.restrict_chat_member(chat_id, target_id, permissions=perms, until_date=until)
+        if context.job_queue:
+            context.job_queue.run_once(
+                revive_after_mute,
+                when=180,
+                data={"chat_id": chat_id, "user_id": target_id},
+                name=f"revive_{chat_id}_{target_id}",
+            )
+    except Exception:
+        pass
+
+
 async def cmd_addcoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
@@ -1420,6 +1463,22 @@ async def cmd_addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.execute("UPDATE users SET token=token+? WHERE user_id=?", (amt, uid))
         conn.commit()
     await update.message.reply_text(f"Token ditambahkan: +{amt} ke {uid}")
+
+
+async def cmd_heal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    user = ensure_user(update.effective_user)
+    target_id = parse_target(update, context.args) or user.user_id
+    target = get_user(target_id)
+    if not target:
+        await update.message.reply_text("Target tidak valid.")
+        return
+    hp_max = target.hp_max
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET hp=? WHERE user_id=?", (hp_max, target_id))
+        conn.commit()
+    await update.message.reply_text(f"❤️ {user_tag(target_id)} di-heal ke {hp_max}/{hp_max}.")
 
 
 async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1643,6 +1702,7 @@ def main():
 
     app.add_handler(CommandHandler(["addcoin", "ac"], cmd_addcoin))
     app.add_handler(CommandHandler(["addtoken", "at"], cmd_addtoken))
+    app.add_handler(CommandHandler("heal", cmd_heal))
     app.add_handler(CommandHandler(["premiumuser", "pu"], cmd_premium))
     app.add_handler(CommandHandler(["setrole", "sr"], cmd_setrole))
     app.add_handler(CommandHandler(["clearrole", "cr"], cmd_clearrole))

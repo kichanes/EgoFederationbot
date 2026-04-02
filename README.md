@@ -51,7 +51,6 @@ PGSSL=false
 - `/shop`
 - `/buy <kode_item>`
 - `/pot`
-- `/armor`
 - `/lp`
 - `/dor <id/@username>` atau reply lalu `/dor`
 - `/kp <id/@username>` atau reply lalu `/kp`
@@ -83,7 +82,9 @@ PGSSL=false
 - EXP grup otomatis: 1 chat = random 5-15 EXP, cooldown 5 menit.
 - Inventory default 5 slot + upgrade tas one-time per jenis.
 - HP/Armor + alert otomatis saat HP < 20%.
-- Shop menampilkan list + bubble tombol beli.
+- Shop menampilkan list sederhana (nama item + harga) dengan bubble:
+  - 4 slot item per page
+  - 1 slot bubble `Next` untuk pindah ke page berikutnya.
 - Secret shop terbuka saat level >= 5.
 - Daily reward: +150 cash +50 exp (premium double).
 - Weekly reward: +500 cash +250 exp +1 token +1 chest random (premium double reward/token).

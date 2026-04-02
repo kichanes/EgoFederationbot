@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -35,6 +36,7 @@ DAILY_COOLDOWN = 24 * 3600
 WEEKLY_COOLDOWN = 7 * 24 * 3600
 KP_DAMAGE_RANGE = (5, 10)
 SEMAK_DAMAGE_RANGE = (7, 12)
+DOR_COOLDOWN_SECONDS = 60
 
 ROLE_RANGES = [
     (1, 5, "💩 Manusia Antah Berantah"), (6, 10, "👩🏿‍🦲 Super Gembel"), (11, 15, "👩🏾‍🦲 Gembel"),
@@ -214,6 +216,14 @@ def init_db() -> None:
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dor_cooldown (
+                user_id INTEGER PRIMARY KEY,
+                last_used TEXT
             )
             """
         )
@@ -403,6 +413,50 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
+def in_same_group(chat_id: int, user_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT 1 FROM chat_users WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+        return bool(row)
+
+
+def check_dor_cooldown(user_id: int) -> Optional[int]:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT last_used FROM dor_cooldown WHERE user_id=?", (user_id,)).fetchone()
+        if not row or not row[0]:
+            return None
+        elapsed = (now_utc() - datetime.fromisoformat(row[0])).total_seconds()
+        if elapsed < DOR_COOLDOWN_SECONDS:
+            return int(DOR_COOLDOWN_SECONDS - elapsed)
+    return None
+
+
+def set_dor_used(user_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO dor_cooldown (user_id, last_used) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET last_used=excluded.last_used",
+            (user_id, now_utc().isoformat()),
+        )
+        conn.commit()
+
+
+async def post_damage_effects(update: Update, context: ContextTypes.DEFAULT_TYPE, target_id: int, hp: int, cause: str):
+    if hp > 0:
+        if hp < int(MAX_HP * 0.2):
+            await update.message.reply_text(
+                f"⚠️ HP target ({target_id}) kritis (<20%). Segera beli /buy potion_red lalu pakai /pot."
+            )
+        return
+    await update.message.reply_text(f"☠️ User {target_id} telah mati. Penyebab: {cause}.")
+    if update.effective_chat.type in {"group", "supergroup"}:
+        try:
+            until = now_utc() + timedelta(minutes=3)
+            perms = ChatPermissions(can_send_messages=False)
+            await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms, until_date=until)
+            await update.message.reply_text(f"🔇 User {target_id} dimute 3 menit karena mati.")
+        except Exception:
+            await update.message.reply_text("Tidak bisa mute target (cek izin bot sebagai admin).")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
     if update.effective_chat.type != "private":
@@ -413,7 +467,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Command User\n"
-        "/start\n/p atau /profile\n/status\n/inv\n/shop\n/buy <kode_item>\n/pot\n/armor\n/lp\n"
+        "/start\n/p atau /profile\n/status\n/inv\n/shop\n/buy <kode_item>\n/pot\n/lp\n"
         "/dor <id/@username> atau reply lalu /dor\n/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
         "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
     )
@@ -457,7 +511,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"HP : {user.hp}/{user.hp_max}\nArmor : {user.armor}\nBuff : {buff}\nDebuff : {debuff}"
     await update.message.reply_text(text)
     if user.hp < int(user.hp_max * 0.2):
-        await update.message.reply_text("🚨 ALERT: HP kamu di bawah 20%, segera gunakan /pot atau /armor.")
+        await update.message.reply_text("🚨 ALERT: HP kamu di bawah 20%, segera beli /buy potion_red lalu pakai /pot.")
 
 
 async def cmd_inv(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -480,25 +534,55 @@ def discount_price(user: UserData, price: int) -> int:
 
 async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
-    lines = ["🛒 Shop:"]
-    buttons = []
+    await send_shop_page(update, user, page=0)
+
+
+def fetch_shop_rows(user: UserData):
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
         rows = c.execute(
             """SELECT code, name, type, price, description, is_secret
                FROM shop_catalog
                ORDER BY is_secret ASC, id ASC"""
         ).fetchall()
-    secret_printed = False
-    for code, name, _type, price_raw, desc, is_secret in rows:
-        if is_secret and user.level < 5:
-            continue
-        if is_secret and not secret_printed:
-            lines.append("\n🔐 Secret Shop terbuka:")
-            secret_printed = True
+    return [r for r in rows if not r[5] or user.level >= 5]
+
+
+async def send_shop_page(update: Update, user: UserData, page: int, from_callback: bool = False):
+    rows = fetch_shop_rows(user)
+    per_page = 4
+    total_pages = max(1, (len(rows) + per_page - 1) // per_page)
+    page = page % total_pages
+    start = page * per_page
+    chunk = rows[start:start + per_page]
+
+    lines = [f"🛒 Shop (Page {page + 1}/{total_pages}):"]
+    for code, name, _type, price_raw, _desc, is_secret in chunk:
+        tag = " [Secret]" if is_secret else ""
         price = discount_price(user, price_raw)
-        lines.append(f"- {name} ({desc}) | Harga {format_int(price)} | /buy {code}")
-        buttons.append([InlineKeyboardButton(f"Beli {name} - {format_int(price)}", callback_data=f"buy:{code}")])
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+        lines.append(f"- {name}{tag} | Harga {format_int(price)}")
+
+    buttons = []
+    for code, name, _type, price_raw, _desc, _is_secret in chunk:
+        price = discount_price(user, price_raw)
+        buttons.append([InlineKeyboardButton(f"{name} ({format_int(price)})", callback_data=f"buy:{code}")])
+
+    if total_pages > 1:
+        buttons.append([InlineKeyboardButton("➡️ Next", callback_data=f"shop:{page + 1}")])
+
+    text = "\n".join(lines)
+    if from_callback and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_shop_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = ensure_user(query.from_user)
+    _, raw_page = query.data.split(":", 1)
+    page = int(raw_page) if raw_page.isdigit() else 0
+    await send_shop_page(update, user, page=page, from_callback=True)
 
 
 async def buy_item(user: UserData, code: str) -> str:
@@ -530,6 +614,12 @@ async def buy_item(user: UserData, code: str) -> str:
             c.execute("UPDATE users SET cash=cash-?, inventory_capacity=inventory_capacity+? WHERE user_id=?", (price, item['capacity'], user.user_id))
             conn.commit()
         return f"Berhasil beli {name}. Kapasitas inventory +{item['capacity']}."
+
+    if code == "armor_item":
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE users SET cash=cash-?, armor=armor+100 WHERE user_id=?", (price, user.user_id))
+            conn.commit()
+        return "Berhasil beli 🦺 Armor. Armor +100 otomatis terpakai."
 
     if inventory_slots_used(user.user_id) >= user.inventory_capacity and get_item_qty(user.user_id, code) == 0:
         return "Inventory penuh. Upgrade tas dulu di shop."
@@ -636,9 +726,14 @@ def apply_damage(target_id: int, dmg: int) -> Tuple[int, int, int]:
 
 async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, min_dmg: int, max_dmg: int, label: str):
     user = ensure_user(update.effective_user)
+    if update.effective_chat.type in {"group", "supergroup"}:
+        update_chat_member(update.effective_chat.id, user.user_id)
     target_id = parse_target(update, context.args)
     if not target_id or not get_user(target_id):
         await update.message.reply_text("Target tidak valid.")
+        return
+    if update.effective_chat.type in {"group", "supergroup"} and not update.message.reply_to_message and not in_same_group(update.effective_chat.id, target_id):
+        await update.message.reply_text("Target harus berada di grup yang sama.")
         return
     if target_id == user.user_id:
         await update.message.reply_text("Tidak bisa menyerang diri sendiri.")
@@ -649,6 +744,7 @@ async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code:
     dmg = random.randint(min_dmg, max_dmg)
     hp, armor, hp_dmg = apply_damage(target_id, dmg)
     await update.message.reply_text(f"{label} dilempar ke {target_id}! Damage {dmg} (kena HP {hp_dmg}). Status target HP {hp}, Armor {armor}.")
+    await post_damage_effects(update, context, target_id, hp, f"Kena {label}")
 
 
 async def cmd_kp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -660,10 +756,21 @@ async def cmd_semak(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("/dor hanya bisa digunakan di grup.")
+        return
     user = ensure_user(update.effective_user)
+    update_chat_member(update.effective_chat.id, user.user_id)
+    remain_cd = check_dor_cooldown(user.user_id)
+    if remain_cd is not None:
+        await update.message.reply_text(f"/dor masih cooldown {remain_cd} detik.")
+        return
     target_id = parse_target(update, context.args)
     if not target_id or not get_user(target_id):
         await update.message.reply_text("Target tidak valid.")
+        return
+    if not update.message.reply_to_message and not in_same_group(update.effective_chat.id, target_id):
+        await update.message.reply_text("Target harus berada di grup yang sama.")
         return
     if target_id == user.user_id:
         await update.message.reply_text("Tidak bisa /dor diri sendiri.")
@@ -677,8 +784,10 @@ async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if shielded:
         dmg = max(0, dmg - random.randint(10, 20))
     hp, armor, hp_dmg = apply_damage(target_id, dmg)
+    set_dor_used(user.user_id)
     note = "Target auto pakai 🛡️ Perisai Kelas III." if shielded else "Target tidak punya perisai."
     await update.message.reply_text(f"🔫 Dor! Damage total {dmg} (HP kena {hp_dmg}). {note}\nSisa target: HP {hp}, Armor {armor}")
+    await post_damage_effects(update, context, target_id, hp, "Ditembak /dor")
 
 
 async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: str):
@@ -943,9 +1052,9 @@ def main():
     app.add_handler(CommandHandler("shop", cmd_shop))
     app.add_handler(CommandHandler("buy", cmd_buy))
     app.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^buy:"))
+    app.add_handler(CallbackQueryHandler(cb_shop_page, pattern=r"^shop:"))
     app.add_handler(CommandHandler(["transfer", "tf"], cmd_transfer))
     app.add_handler(CommandHandler("pot", cmd_use_pot))
-    app.add_handler(CommandHandler("armor", cmd_use_armor))
     app.add_handler(CommandHandler("lp", cmd_use_lucky))
     app.add_handler(CommandHandler("dor", cmd_dor))
     app.add_handler(CommandHandler("kp", cmd_kp))

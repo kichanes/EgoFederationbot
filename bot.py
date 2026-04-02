@@ -100,7 +100,7 @@ SPECIAL_ITEMS = {
 }
 
 SECRET_ITEMS = {
-    "chest_key": {"name": "🗝️ Kunci Rahasia", "price": 3000, "type": "consumable", "desc": "Kunci untuk event rahasia", "max_stack": 99}
+    "chest_key": {"name": "🗝️ Kunci Rahasia", "price": 3000, "token_price": 3, "type": "consumable", "desc": "Kunci untuk event rahasia", "max_stack": 99}
 }
 
 CHEST_RATES = [
@@ -542,7 +542,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Command User\n"
-        "/start\n/p atau /profile\n/status\n/inv\n/shop\n/buy <kode_item>\n/pot\n/lp\n"
+        "/start\n/p atau /profile (bisa /p @username atau reply)\n/status\n/inv\n/shop\n/secretshop atau /ss\n/buy <kode_item>\n/pot\n/lp\n"
         "/dor <id/@username> atau reply lalu /dor\n/aim <id/@username> atau reply lalu /aim (owner only)\n"
         "/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
         "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
@@ -551,22 +551,28 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = ensure_user(update.effective_user)
+    requester = ensure_user(update.effective_user)
+    target = requester
+    target_id = parse_target(update, context.args)
+    if target_id:
+        found = get_user(target_id)
+        if found:
+            target = found
     if update.effective_chat.type != "private":
-        update_chat_member(update.effective_chat.id, user.user_id)
-    dt = datetime.fromisoformat(user.register_at).astimezone(WIB)
+        update_chat_member(update.effective_chat.id, requester.user_id)
+    dt = datetime.fromisoformat(target.register_at).astimezone(WIB)
     now = datetime.now(WIB)
     msg = (
-        f"Nama : {user.name}\n"
-        f"Username : {user.username}\n"
-        f"ID : {user.user_id}\n"
-        f"Cash : {format_int(user.cash)}\n"
-        f"Level : {user.level} ({user.exp}/{exp_needed(user.level)})\n"
-        f"Role : {user.role or '-'}\n"
-        f"Register Date : {dt.strftime('%Y-%m-%d')}\n"
-        f"Time : {now.strftime('%H:%M:%S WIB')}"
+        f"Nama : {target.name}\n"
+        f"Username : {target.username}\n"
+        f"ID : {target.user_id}\n"
+        f"Cash : {format_int(target.cash)}\n"
+        f"Level : {target.level} ({target.exp}/{exp_needed(target.level)})\n"
+        f"Role : {target.role or '-'}\n"
+        f"Register Date : _{dt.strftime('%Y-%m-%d')}_\n"
+        f"Time : _{now.strftime('%H:%M:%S WIB')}_"
     )
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -634,8 +640,13 @@ async def send_shop_page(update: Update, user: UserData, page: int, from_callbac
     lines = [f"🛒 Shop (Page {page + 1}/{total_pages}):"]
     for code, name, _type, price_raw, _desc, is_secret in chunk:
         tag = " [Secret]" if is_secret else ""
-        price = discount_price(user, price_raw)
-        lines.append(f"- {name}{tag} | Harga {format_int(price)}")
+        item = SHOP_ITEMS.get(code) or SECRET_ITEMS.get(code) or {}
+        token_price = item.get("token_price")
+        if is_secret and token_price is not None:
+            lines.append(f"- {name}{tag} | Harga {token_price} token")
+        else:
+            price = discount_price(user, price_raw)
+            lines.append(f"- {name}{tag} | Harga {format_int(price)}")
 
     buttons = []
     for code, name, _type, price_raw, _desc, _is_secret in chunk:
@@ -677,11 +688,17 @@ async def buy_item(user: UserData, code: str) -> str:
     if not item:
         return "Item belum dipetakan ke gameplay."
 
-    price = discount_price(user, base_price)
-    if user.cash < price:
-        return "Cash kamu tidak cukup."
+    token_price = item.get("token_price")
+    if is_secret and token_price is not None:
+        if user.token < token_price:
+            return "Token kamu tidak cukup."
+    else:
+        price = discount_price(user, base_price)
+        if user.cash < price:
+            return "Cash kamu tidak cukup."
 
     if item_type == "upgrade":
+        price = discount_price(user, base_price)
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
             exists = c.execute("SELECT 1 FROM bag_upgrades WHERE user_id=? AND item_code=?", (user.user_id, code)).fetchone()
             if exists:
@@ -692,6 +709,7 @@ async def buy_item(user: UserData, code: str) -> str:
         return f"Berhasil beli {name}. Kapasitas inventory +{item['capacity']}."
 
     if code == "armor_item":
+        price = discount_price(user, base_price)
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
             armor_now = c.execute("SELECT armor FROM users WHERE user_id=?", (user.user_id,)).fetchone()[0]
             if armor_now >= MAX_ARMOR:
@@ -712,12 +730,18 @@ async def buy_item(user: UserData, code: str) -> str:
         return f"Stack {name} sudah maksimum ({max_stack})."
 
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (price, user.user_id))
+        if is_secret and token_price is not None:
+            conn.execute("UPDATE users SET token=token-? WHERE user_id=?", (token_price, user.user_id))
+        else:
+            price = discount_price(user, base_price)
+            conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (price, user.user_id))
         conn.execute(
             "INSERT INTO inventory (user_id, item_code, qty) VALUES (?, ?, 1) ON CONFLICT(user_id, item_code) DO UPDATE SET qty=qty+1",
             (user.user_id, code),
         )
         conn.commit()
+    if is_secret and token_price is not None:
+        return f"Berhasil beli {name} pakai {token_price} token."
     return f"Berhasil beli {name}."
 
 
@@ -755,7 +779,35 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (amount, sender.user_id))
         conn.execute("UPDATE users SET cash=cash+? WHERE user_id=?", (amount, target_id))
         conn.commit()
-    await update.message.reply_text(f"Transfer berhasil: {format_int(amount)} ke {target_id}")
+    await update.message.reply_text(
+        f"_Transfer berhasil: {format_int(amount)} ke {target_id}_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_secretshop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if user.level < 5:
+        await update.message.reply_text("🔒 Secret shop terbuka saat level 5.")
+        return
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        rows = c.execute(
+            """SELECT code, name, description
+               FROM shop_catalog
+               WHERE is_secret=1
+               ORDER BY id ASC"""
+        ).fetchall()
+    if not rows:
+        await update.message.reply_text("Secret shop belum tersedia.")
+        return
+    lines = [f"🕵️ Secret Shop (Token kamu: {user.token})"]
+    buttons = []
+    for code, name, _desc in rows:
+        item = SECRET_ITEMS.get(code, {})
+        token_price = item.get("token_price", 1)
+        lines.append(f"- {name} | Harga {token_price} token")
+        buttons.append([InlineKeyboardButton(f"{name} ({token_price} token)", callback_data=f"buy:{code}")])
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def cmd_use_pot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1234,6 +1286,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("inv", cmd_inv))
     app.add_handler(CommandHandler("shop", cmd_shop))
+    app.add_handler(CommandHandler(["secretshop", "ss"], cmd_secretshop))
     app.add_handler(CommandHandler("buy", cmd_buy))
     app.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^buy:"))
     app.add_handler(CallbackQueryHandler(cb_shop_page, pattern=r"^shop:"))

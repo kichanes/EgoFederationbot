@@ -131,11 +131,11 @@ CHEST_RATES = [
 
 CHEST_REWARDS = {
     "uncommon": {"cash": 150, "token": (0, 1), "items": []},
-    "common": {"cash": 250, "token": (0, 2), "items": []},
-    "rare": {"cash": 350, "token": (1, 2), "items": ["banana"]},
-    "epic": {"cash": 500, "token": (1, 3), "items": ["banana", "sandal"]},
-    "legend": {"cash": 750, "token": (2, 3), "items": ["banana", "sandal", "luck_potion"]},
-    "myth": {"cash": 1500, "token": (2, 5), "items": ["banana", "sandal", "luck_potion", "armor_item", "pistol_3"]},
+    "common": {"cash": 250, "token": (0, 2), "items": ["banana"]},
+    "rare": {"cash": 350, "token": (1, 2), "items": ["banana", "sandal", "shield_3"]},
+    "epic": {"cash": 500, "token": (2, 5), "items": ["banana", "sandal", "shield_3", "pistol_3"]},
+    "legend": {"cash": 750, "token": (3, 5), "items": ["banana", "sandal", "shield_2", "pistol_2"]},
+    "myth": {"cash": 1500, "token": (5, 10), "items": ["banana", "sandal", "shield_1", "pistol_1"], "bonus_awm_chance": 0.2},
 }
 
 
@@ -1241,6 +1241,10 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: 
             for code in reward["items"]:
                 add_item(user.user_id, code, 1)
                 got_items.append(SHOP_ITEMS[code]["name"])
+            bonus_awm = reward.get("bonus_awm_chance")
+            if bonus_awm and random.random() <= bonus_awm:
+                add_item(user.user_id, "awm_item", 1)
+                got_items.append(SECRET_ITEMS["awm_item"]["name"])
             luck_note = " (Lucky Potion aktif)" if luck_active else ""
             item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
             chest_msg = f"\n🎁 Chest {chest_tier}{luck_note}: +{reward['cash'] * multi} cash, +{token_bonus} token{item_note}"

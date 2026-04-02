@@ -13,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram import ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import (
+    ApplicationHandlerStop,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -37,7 +38,7 @@ MAX_ARMOR = 100
 DAILY_COOLDOWN = 24 * 3600
 WEEKLY_COOLDOWN = 7 * 24 * 3600
 KP_DAMAGE_RANGE = (5, 10)
-SEMAK_DAMAGE_RANGE = (7, 12)
+SEMAK_DAMAGE_RANGE = (5, 10)
 DOR_COOLDOWN_SECONDS = 60
 
 ROLE_RANGES = [
@@ -54,7 +55,7 @@ ROLE_RANGES = [
 
 SHOP_ITEMS = {
     "banana": {"name": "🍌 Kulit Pisang", "price": 200, "type": "consumable", "desc": "Damage 5-10", "max_stack": 999},
-    "sandal": {"name": "🩴 Sandal Emak", "price": 2500, "type": "consumable", "desc": "Damage 7-12", "max_stack": 999},
+    "sandal": {"name": "🩴 Sandal Emak", "price": 200, "type": "consumable", "desc": "Damage 5-10", "max_stack": 999},
     "ramal_scroll": {"name": "🔮 Ramal", "price": 200, "type": "consumable", "desc": "Sekali pakai untuk intip inventory target (/ramal)", "max_stack": 99},
     "luck_potion": {"name": "🧪 Lucky Potion", "price": 5000, "type": "consumable", "desc": "Buff luck +5% (pakai /lp)", "max_stack": 99},
     "luck_potion_med": {"name": "⚗️ Luck Potion Med", "price": 7500, "type": "consumable", "desc": "Buff luck +15% (pakai /lpm)", "max_stack": 99},
@@ -232,7 +233,8 @@ def init_db() -> None:
                 weekly_last_claim TEXT,
                 luck_buff_until TEXT,
                 luck_buff_rate INTEGER DEFAULT 0,
-                premium_until TEXT
+                premium_until TEXT,
+                role_locked INTEGER DEFAULT 0
             )
             """
         )
@@ -245,6 +247,8 @@ def init_db() -> None:
             c.execute("ALTER TABLE users ADD COLUMN radiation_until TEXT")
         if "luck_buff_rate" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN luck_buff_rate INTEGER DEFAULT 0")
+        if "role_locked" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN role_locked INTEGER DEFAULT 0")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -385,7 +389,9 @@ def add_exp(user_id: int, amount: int) -> Tuple[int, int]:
             exp -= exp_needed(level)
             level += 1
             up += 1
-        c.execute("UPDATE users SET level=?, exp=?, role=? WHERE user_id=?", (level, exp, role_for_level(level), user_id))
+        current_role, role_locked = c.execute("SELECT role, role_locked FROM users WHERE user_id=?", (user_id,)).fetchone()
+        new_role = current_role if role_locked else role_for_level(level)
+        c.execute("UPDATE users SET level=?, exp=?, role=? WHERE user_id=?", (level, exp, new_role, user_id))
         conn.commit()
         return level, up
 
@@ -592,7 +598,10 @@ async def post_damage_effects(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"⚠️ HP target ({target_tag}) kritis (<20%). Segera beli /buy potion_red lalu pakai /pot."
             )
         return
-    await update.message.reply_text(f"☠️ User {target_tag} telah mati. Penyebab: {cause}.")
+    await update.message.reply_text(
+        f"☠️ User {target_tag} telah mati. Penyebab: {cause}.\n"
+        "⚠️ Kamu mati, jadi tidak bisa memakai command sampai HP dipulihkan."
+    )
     if update.effective_chat.type in {"group", "supergroup"}:
         try:
             until = now_utc() + timedelta(minutes=3)
@@ -1462,6 +1471,30 @@ async def require_owner(update: Update) -> bool:
     return True
 
 
+def is_damage_command_in_private(command_text: str, chat_type: str) -> bool:
+    if chat_type != "private":
+        return False
+    cmd = command_text.split()[0].lower().lstrip("/")
+    return cmd in {"kp", "semak", "bom", "piw", "dor", "aim", "dhuar"}
+
+
+async def guard_user_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text or not update.message.text.startswith("/"):
+        return
+    user = ensure_user(update.effective_user)
+    if user.hp <= 0:
+        await update.message.reply_text(
+            "☠️ Kamu sedang mati, jadi tidak bisa menggunakan command apa pun.\n"
+            "Pulihkan HP dulu sebelum memakai command lagi."
+        )
+        raise ApplicationHandlerStop
+    if is_damage_command_in_private(update.message.text, update.effective_chat.type):
+        await update.message.reply_text(
+            "❌ Tidak bisa menyerang melalui chat pribadi bot. Gunakan command serangan di grup."
+        )
+        raise ApplicationHandlerStop
+
+
 async def is_owner_or_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if is_owner(update.effective_user.id):
         return True
@@ -1500,7 +1533,11 @@ async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
 async def handle_death_background(chat_id: int, target_id: int, context: ContextTypes.DEFAULT_TYPE, cause: str):
     tag = user_tag(target_id)
     try:
-        await context.bot.send_message(chat_id, f"☠️ User {tag} telah mati. Penyebab: {cause}.")
+        await context.bot.send_message(
+            chat_id,
+            f"☠️ User {tag} telah mati. Penyebab: {cause}.\n"
+            "⚠️ Kamu mati, jadi tidak bisa memakai command sampai HP dipulihkan.",
+        )
         until = now_utc() + timedelta(minutes=3)
         perms = ChatPermissions(can_send_messages=False)
         await context.bot.restrict_chat_member(chat_id, target_id, permissions=perms, until_date=until)
@@ -1588,18 +1625,34 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_owner(update):
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("/setrole <id/@username> <role>")
-        return
-    uid = resolve_user_by_ref(context.args[0]); role = " ".join(context.args[1:])
-    if not uid or not get_user(uid):
-        await update.message.reply_text("User tidak ditemukan")
-        return
+    actor_id = update.effective_user.id
+    actor_is_owner = is_owner(actor_id)
+    actor_is_premium = is_premium_active(actor_id)
+
+    if actor_is_owner:
+        if len(context.args) < 2:
+            await update.message.reply_text("/setrole <id/@username> <role>")
+            return
+        uid = resolve_user_by_ref(context.args[0]); role = " ".join(context.args[1:])
+        if not uid or not get_user(uid):
+            await update.message.reply_text("User tidak ditemukan")
+            return
+    else:
+        if not actor_is_premium:
+            await update.message.reply_text("Khusus owner atau user premium (untuk diri sendiri).")
+            return
+        if not context.args:
+            await update.message.reply_text("/setrole <role_baru> (premium hanya untuk diri sendiri)")
+            return
+        uid = actor_id
+        role = " ".join(context.args)
+
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET role=? WHERE user_id=?", (role, uid)); conn.commit()
-    await update.message.reply_text("Role diperbarui")
+        conn.execute("UPDATE users SET role=?, role_locked=1 WHERE user_id=?", (role, uid)); conn.commit()
+    if actor_is_owner:
+        await update.message.reply_text("Role diperbarui")
+    else:
+        await update.message.reply_text("Role kamu diperbarui (mode premium).")
 
 
 async def cmd_clearrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1609,12 +1662,13 @@ async def cmd_clearrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/clearrole <id/@username>")
         return
     uid = resolve_user_by_ref(context.args[0])
-    if not uid or not get_user(uid):
+    target = get_user(uid) if uid else None
+    if not uid or not target:
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET role='' WHERE user_id=?", (uid,)); conn.commit()
-    await update.message.reply_text("Role dihapus")
+        conn.execute("UPDATE users SET role=?, role_locked=0 WHERE user_id=?", (role_for_level(target.level), uid)); conn.commit()
+    await update.message.reply_text("Role custom dihapus (kembali ke role level)")
 
 
 async def cmd_setlevel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1628,7 +1682,9 @@ async def cmd_setlevel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET level=?, exp=0, role=? WHERE user_id=?", (level, role_for_level(level), uid)); conn.commit()
+        current_role, role_locked = conn.execute("SELECT role, role_locked FROM users WHERE user_id=?", (uid,)).fetchone()
+        new_role = current_role if role_locked else role_for_level(level)
+        conn.execute("UPDATE users SET level=?, exp=0, role=? WHERE user_id=?", (level, new_role, uid)); conn.commit()
     await update.message.reply_text("Level diatur")
 
 
@@ -1643,7 +1699,9 @@ async def cmd_defaultlevel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET level=1, exp=0, role=? WHERE user_id=?", (role_for_level(1), uid)); conn.commit()
+        current_role, role_locked = conn.execute("SELECT role, role_locked FROM users WHERE user_id=?", (uid,)).fetchone()
+        new_role = current_role if role_locked else role_for_level(1)
+        conn.execute("UPDATE users SET level=1, exp=0, role=? WHERE user_id=?", (new_role, uid)); conn.commit()
     await update.message.reply_text("Level default")
 
 
@@ -1658,7 +1716,13 @@ async def cmd_addexp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     lvl, _ = add_exp(uid, amt)
-    await update.message.reply_text(f"EXP ditambahkan. Level sekarang: {lvl}")
+    target = get_user(uid)
+    if not target:
+        await update.message.reply_text(f"EXP ditambahkan. Level sekarang: {lvl}")
+        return
+    await update.message.reply_text(
+        f"EXP ditambahkan. Level sekarang: {lvl}. EXP: {target.exp}/{exp_needed(target.level)}"
+    )
 
 
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1753,6 +1817,7 @@ def main():
         raise RuntimeError("BOT_TOKEN belum diset")
     init_db()
     app = Application.builder().token(token).build()
+    app.add_handler(MessageHandler(filters.COMMAND, guard_user_state), group=-1)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler(["p", "profile"], cmd_profile))

@@ -1625,18 +1625,34 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_owner(update):
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("/setrole <id/@username> <role>")
-        return
-    uid = resolve_user_by_ref(context.args[0]); role = " ".join(context.args[1:])
-    if not uid or not get_user(uid):
-        await update.message.reply_text("User tidak ditemukan")
-        return
+    actor_id = update.effective_user.id
+    actor_is_owner = is_owner(actor_id)
+    actor_is_premium = is_premium_active(actor_id)
+
+    if actor_is_owner:
+        if len(context.args) < 2:
+            await update.message.reply_text("/setrole <id/@username> <role>")
+            return
+        uid = resolve_user_by_ref(context.args[0]); role = " ".join(context.args[1:])
+        if not uid or not get_user(uid):
+            await update.message.reply_text("User tidak ditemukan")
+            return
+    else:
+        if not actor_is_premium:
+            await update.message.reply_text("Khusus owner atau user premium (untuk diri sendiri).")
+            return
+        if not context.args:
+            await update.message.reply_text("/setrole <role_baru> (premium hanya untuk diri sendiri)")
+            return
+        uid = actor_id
+        role = " ".join(context.args)
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE users SET role=?, role_locked=1 WHERE user_id=?", (role, uid)); conn.commit()
-    await update.message.reply_text("Role diperbarui")
+    if actor_is_owner:
+        await update.message.reply_text("Role diperbarui")
+    else:
+        await update.message.reply_text("Role kamu diperbarui (mode premium).")
 
 
 async def cmd_clearrole(update: Update, context: ContextTypes.DEFAULT_TYPE):

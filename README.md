@@ -117,6 +117,23 @@ PGSSL=false
 - Daftar shop diambil dari tabel `shop_catalog` (bukan hardcoded output saja).
 - Armor dibeli via `/buy armor_item` dan otomatis terpakai, maksimum armor tetap 100/100.
 
+## Troubleshooting
+
+### Chat bot "hilang" setelah 15 detik
+
+Jika pesan bot terlihat hilang otomatis setelah 15 detik, biasanya penyebabnya adalah fitur **Auto-Delete Messages** di Telegram (level chat/grup), bukan karena logic bot.
+
+Langkah cek:
+
+1. Buka profil chat/grup tempat bot dipakai.
+2. Masuk ke pengaturan **Auto-Delete Messages**.
+3. Ubah timer dari **15 seconds** ke **Off** (atau durasi lain sesuai kebutuhan).
+
+Catatan:
+
+- Bot ini tidak menghapus pesan user/bot secara otomatis dalam kode utama.
+- Jika fitur auto-delete aktif di chat, semua pesan (termasuk balasan bot) bisa ikut terhapus.
+
 ## Model Shop (Catalog Item)
 
 Struktur tabel:

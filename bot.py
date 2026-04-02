@@ -13,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram import ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import (
+    ApplicationHandlerStop,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -592,7 +593,10 @@ async def post_damage_effects(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"⚠️ HP target ({target_tag}) kritis (<20%). Segera beli /buy potion_red lalu pakai /pot."
             )
         return
-    await update.message.reply_text(f"☠️ User {target_tag} telah mati. Penyebab: {cause}.")
+    await update.message.reply_text(
+        f"☠️ User {target_tag} telah mati. Penyebab: {cause}.\n"
+        "⚠️ Kamu mati, jadi tidak bisa memakai command sampai HP dipulihkan."
+    )
     if update.effective_chat.type in {"group", "supergroup"}:
         try:
             until = now_utc() + timedelta(minutes=3)
@@ -1462,6 +1466,30 @@ async def require_owner(update: Update) -> bool:
     return True
 
 
+def is_damage_command_in_private(command_text: str, chat_type: str) -> bool:
+    if chat_type != "private":
+        return False
+    cmd = command_text.split()[0].lower().lstrip("/")
+    return cmd in {"kp", "semak", "bom", "piw", "dor", "aim", "dhuar"}
+
+
+async def guard_user_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text or not update.message.text.startswith("/"):
+        return
+    user = ensure_user(update.effective_user)
+    if user.hp <= 0:
+        await update.message.reply_text(
+            "☠️ Kamu sedang mati, jadi tidak bisa menggunakan command apa pun.\n"
+            "Pulihkan HP dulu sebelum memakai command lagi."
+        )
+        raise ApplicationHandlerStop
+    if is_damage_command_in_private(update.message.text, update.effective_chat.type):
+        await update.message.reply_text(
+            "❌ Tidak bisa menyerang melalui chat pribadi bot. Gunakan command serangan di grup."
+        )
+        raise ApplicationHandlerStop
+
+
 async def is_owner_or_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if is_owner(update.effective_user.id):
         return True
@@ -1500,7 +1528,11 @@ async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
 async def handle_death_background(chat_id: int, target_id: int, context: ContextTypes.DEFAULT_TYPE, cause: str):
     tag = user_tag(target_id)
     try:
-        await context.bot.send_message(chat_id, f"☠️ User {tag} telah mati. Penyebab: {cause}.")
+        await context.bot.send_message(
+            chat_id,
+            f"☠️ User {tag} telah mati. Penyebab: {cause}.\n"
+            "⚠️ Kamu mati, jadi tidak bisa memakai command sampai HP dipulihkan.",
+        )
         until = now_utc() + timedelta(minutes=3)
         perms = ChatPermissions(can_send_messages=False)
         await context.bot.restrict_chat_member(chat_id, target_id, permissions=perms, until_date=until)
@@ -1759,6 +1791,7 @@ def main():
         raise RuntimeError("BOT_TOKEN belum diset")
     init_db()
     app = Application.builder().token(token).build()
+    app.add_handler(MessageHandler(filters.COMMAND, guard_user_state), group=-1)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler(["p", "profile"], cmd_profile))

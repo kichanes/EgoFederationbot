@@ -32,6 +32,7 @@ EXP_MIN = 5
 EXP_MAX = 15
 EXP_COOLDOWN_SECONDS = 300
 MAX_HP = 200
+MAX_ARMOR = 100
 DAILY_COOLDOWN = 24 * 3600
 WEEKLY_COOLDOWN = 7 * 24 * 3600
 KP_DAMAGE_RANGE = (5, 10)
@@ -508,7 +509,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.hp < int(user.hp_max * 0.2):
         debuff = "⚠️ HP kritis (<20%)"
     buff = ", ".join(buff_list) if buff_list else "Tidak ada"
-    text = f"HP : {user.hp}/{user.hp_max}\nArmor : {user.armor}\nBuff : {buff}\nDebuff : {debuff}"
+    text = f"HP : {user.hp}/{user.hp_max}\nArmor : {user.armor}/{MAX_ARMOR}\nBuff : {buff}\nDebuff : {debuff}"
     await update.message.reply_text(text)
     if user.hp < int(user.hp_max * 0.2):
         await update.message.reply_text("🚨 ALERT: HP kamu di bawah 20%, segera beli /buy potion_red lalu pakai /pot.")
@@ -616,10 +617,16 @@ async def buy_item(user: UserData, code: str) -> str:
         return f"Berhasil beli {name}. Kapasitas inventory +{item['capacity']}."
 
     if code == "armor_item":
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("UPDATE users SET cash=cash-?, armor=armor+100 WHERE user_id=?", (price, user.user_id))
+        with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+            armor_now = c.execute("SELECT armor FROM users WHERE user_id=?", (user.user_id,)).fetchone()[0]
+            if armor_now >= MAX_ARMOR:
+                return "Armor kamu masih penuh (100/100), tidak bisa beli armor lagi sekarang."
+            conn.execute(
+                "UPDATE users SET cash=cash-?, armor=? WHERE user_id=?",
+                (price, MAX_ARMOR, user.user_id),
+            )
             conn.commit()
-        return "Berhasil beli 🦺 Armor. Armor +100 otomatis terpakai."
+        return f"Berhasil beli 🦺 Armor. Armor diisi ulang ke {MAX_ARMOR}/{MAX_ARMOR}."
 
     if inventory_slots_used(user.user_id) >= user.inventory_capacity and get_item_qty(user.user_id, code) == 0:
         return "Inventory penuh. Upgrade tas dulu di shop."

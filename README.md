@@ -91,6 +91,7 @@ PGSSL=false
 - Premium privilege: double daily/weekly reward, diskon shop 30%.
 - Lucky Potion (`/lp`) aktif 60 menit dan meningkatkan peluang chest tier bagus saat claim weekly.
 - Daftar shop diambil dari tabel `shop_catalog` (bukan hardcoded output saja).
+- Armor dibeli via `/buy armor_item` dan otomatis terpakai, maksimum armor tetap 100/100.
 
 ## Model Shop (Catalog Item)
 

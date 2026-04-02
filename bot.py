@@ -233,7 +233,8 @@ def init_db() -> None:
                 weekly_last_claim TEXT,
                 luck_buff_until TEXT,
                 luck_buff_rate INTEGER DEFAULT 0,
-                premium_until TEXT
+                premium_until TEXT,
+                role_locked INTEGER DEFAULT 0
             )
             """
         )
@@ -246,6 +247,8 @@ def init_db() -> None:
             c.execute("ALTER TABLE users ADD COLUMN radiation_until TEXT")
         if "luck_buff_rate" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN luck_buff_rate INTEGER DEFAULT 0")
+        if "role_locked" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN role_locked INTEGER DEFAULT 0")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -386,7 +389,9 @@ def add_exp(user_id: int, amount: int) -> Tuple[int, int]:
             exp -= exp_needed(level)
             level += 1
             up += 1
-        c.execute("UPDATE users SET level=?, exp=?, role=? WHERE user_id=?", (level, exp, role_for_level(level), user_id))
+        current_role, role_locked = c.execute("SELECT role, role_locked FROM users WHERE user_id=?", (user_id,)).fetchone()
+        new_role = current_role if role_locked else role_for_level(level)
+        c.execute("UPDATE users SET level=?, exp=?, role=? WHERE user_id=?", (level, exp, new_role, user_id))
         conn.commit()
         return level, up
 
@@ -1630,7 +1635,7 @@ async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET role=? WHERE user_id=?", (role, uid)); conn.commit()
+        conn.execute("UPDATE users SET role=?, role_locked=1 WHERE user_id=?", (role, uid)); conn.commit()
     await update.message.reply_text("Role diperbarui")
 
 
@@ -1641,12 +1646,13 @@ async def cmd_clearrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/clearrole <id/@username>")
         return
     uid = resolve_user_by_ref(context.args[0])
-    if not uid or not get_user(uid):
+    target = get_user(uid) if uid else None
+    if not uid or not target:
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET role='' WHERE user_id=?", (uid,)); conn.commit()
-    await update.message.reply_text("Role dihapus")
+        conn.execute("UPDATE users SET role=?, role_locked=0 WHERE user_id=?", (role_for_level(target.level), uid)); conn.commit()
+    await update.message.reply_text("Role custom dihapus (kembali ke role level)")
 
 
 async def cmd_setlevel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1660,7 +1666,9 @@ async def cmd_setlevel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET level=?, exp=0, role=? WHERE user_id=?", (level, role_for_level(level), uid)); conn.commit()
+        current_role, role_locked = conn.execute("SELECT role, role_locked FROM users WHERE user_id=?", (uid,)).fetchone()
+        new_role = current_role if role_locked else role_for_level(level)
+        conn.execute("UPDATE users SET level=?, exp=0, role=? WHERE user_id=?", (level, new_role, uid)); conn.commit()
     await update.message.reply_text("Level diatur")
 
 
@@ -1675,7 +1683,9 @@ async def cmd_defaultlevel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET level=1, exp=0, role=? WHERE user_id=?", (role_for_level(1), uid)); conn.commit()
+        current_role, role_locked = conn.execute("SELECT role, role_locked FROM users WHERE user_id=?", (uid,)).fetchone()
+        new_role = current_role if role_locked else role_for_level(1)
+        conn.execute("UPDATE users SET level=1, exp=0, role=? WHERE user_id=?", (new_role, uid)); conn.commit()
     await update.message.reply_text("Level default")
 
 

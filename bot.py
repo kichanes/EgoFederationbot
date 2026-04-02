@@ -59,7 +59,7 @@ SHOP_ITEMS = {
     "ramal_scroll": {"name": "🔮 Ramal", "price": 200, "type": "consumable", "desc": "Sekali pakai untuk intip inventory target (/ramal)", "max_stack": 99},
     "luck_potion": {"name": "🧪 Lucky Potion", "price": 5000, "type": "consumable", "desc": "Buff luck +5% (pakai /lp)", "max_stack": 99},
     "luck_potion_med": {"name": "⚗️ Luck Potion Med", "price": 7500, "type": "consumable", "desc": "Buff luck +15% (pakai /lpm)", "max_stack": 99},
-    "random_chest": {"name": "🎁 Random Chest", "price": 1000, "type": "consumable", "desc": "Buka chest acak sesuai rate weekly", "max_stack": 99},
+    "random_chest": {"name": "🎁 Random Chest", "price": 5000, "type": "consumable", "desc": "Buka chest acak sesuai rate weekly", "max_stack": 99},
     "shield_3": {"name": "🛡️ Perisai Kelas III", "price": 2000, "type": "consumable", "desc": "Shield level III, aktif otomatis saat kena /dor", "max_stack": 99},
     "shield_2": {"name": "🛡️ Perisai Kelas II", "price": 4000, "type": "consumable", "desc": "Shield level II, aktif otomatis saat kena /dor", "max_stack": 99},
     "shield_1": {"name": "🛡️ Perisai Kelas I", "price": 5000, "type": "consumable", "desc": "Shield level I, aktif otomatis saat kena /dor", "max_stack": 99},

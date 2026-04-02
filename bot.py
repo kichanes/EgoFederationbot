@@ -119,6 +119,18 @@ def role_for_level(level: int) -> str:
     return "🎖 Elite Nasional"
 
 
+def parse_premium_duration(token: str) -> Optional[timedelta]:
+    t = token.strip().lower()
+    mapping = {
+        "1m": timedelta(days=30),
+        "3m": timedelta(days=90),
+        "6m": timedelta(days=180),
+        "12m": timedelta(days=365),
+        "1y": timedelta(days=365),
+    }
+    return mapping.get(t)
+
+
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -141,10 +153,14 @@ def init_db() -> None:
                 premium INTEGER DEFAULT 0,
                 daily_last_claim TEXT,
                 weekly_last_claim TEXT,
-                luck_buff_until TEXT
+                luck_buff_until TEXT,
+                premium_until TEXT
             )
             """
         )
+        user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+        if "premium_until" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN premium_until TEXT")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -336,6 +352,21 @@ def has_active_luck(user_id: int) -> bool:
     return bool(until and now_utc() < until)
 
 
+def get_premium_until(user_id: int) -> Optional[datetime]:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT premium_until FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row or not row[0]:
+            return None
+        return datetime.fromisoformat(row[0])
+
+
+def is_premium_active(user_id: int) -> bool:
+    until = get_premium_until(user_id)
+    if until and now_utc() < until:
+        return True
+    return False
+
+
 def roll_chest_tier(luck_active: bool) -> str:
     rates = list(CHEST_RATES)
     if luck_active:
@@ -412,8 +443,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
     buff_list = []
     debuff = "Tidak ada"
-    if user.premium:
-        buff_list.append("Premium: bonus EXP & reward")
+    premium_until = get_premium_until(user.user_id)
+    if premium_until and now_utc() < premium_until:
+        p_remain = str(premium_until - now_utc()).split(".")[0]
+        buff_list.append(f"Premium aktif ({p_remain})")
     luck_until = get_luck_buff_until(user.user_id)
     if luck_until and now_utc() < luck_until:
         remaining = str(luck_until - now_utc()).split(".")[0]
@@ -442,7 +475,7 @@ async def cmd_inv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def discount_price(user: UserData, price: int) -> int:
-    return int(price * 0.7) if user.premium else price
+    return int(price * 0.7) if is_premium_active(user.user_id) else price
 
 
 async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -662,7 +695,7 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE, typ: 
             left = cooldown - (now - datetime.fromisoformat(last))
             await update.message.reply_text(f"Masih cooldown. Sisa: {left}")
             return
-        multi = 2 if user.premium else 1
+        multi = 2 if is_premium_active(user.user_id) else 1
         cash = base_cash * multi
         exp = base_exp * multi
         token_add = base_token * multi
@@ -760,7 +793,7 @@ async def passive_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = now_utc()
         if row and row[0] and now - datetime.fromisoformat(row[0]) < timedelta(seconds=EXP_COOLDOWN_SECONDS):
             return
-        gain = random.randint(EXP_MIN, EXP_MAX) * (2 if user.premium else 1)
+        gain = random.randint(EXP_MIN, EXP_MAX) * (2 if is_premium_active(user.user_id) else 1)
         c.execute("INSERT INTO exp_cooldown (user_id, last_gain) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET last_gain=excluded.last_gain", (user.user_id, now.isoformat()))
         conn.commit()
     lvl, up = add_exp(user.user_id, gain)
@@ -802,17 +835,23 @@ async def cmd_addcoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
-    if len(context.args) != 1:
-        await update.message.reply_text("/premiumuser <id/@username>")
+    if len(context.args) != 2:
+        await update.message.reply_text("/premiumuser <id/@username> <durasi: 1m|3m|6m|12m|1y>")
         return
     uid = resolve_user_by_ref(context.args[0])
+    dur = parse_premium_duration(context.args[1])
     if not uid or not get_user(uid):
         await update.message.reply_text("User tidak ditemukan")
         return
+    if not dur:
+        await update.message.reply_text("Durasi tidak valid. Gunakan: 1m, 3m, 6m, 12m, atau 1y.")
+        return
+    now = now_utc()
+    until = now + dur
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET premium=1 WHERE user_id=?", (uid,))
+        conn.execute("UPDATE users SET premium=1, premium_until=? WHERE user_id=?", (until.isoformat(), uid))
         conn.commit()
-    await update.message.reply_text("Premium aktif")
+    await update.message.reply_text(f"Premium aktif sampai {until.astimezone(WIB).strftime('%Y-%m-%d %H:%M:%S WIB')}")
 
 
 async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):

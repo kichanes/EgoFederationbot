@@ -1139,6 +1139,51 @@ async def cmd_addexp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"EXP ditambahkan. Level sekarang: {lvl}")
 
 
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("/mute hanya bisa digunakan di grup.")
+        return
+    if not await require_owner(update):
+        return
+    target_id = parse_target(update, context.args)
+    if not target_id or not get_user(target_id):
+        await update.message.reply_text("Gunakan: /mute <id/@username> [durasi_menit] atau reply command.")
+        return
+    if target_id == update.effective_user.id:
+        await update.message.reply_text("Tidak bisa mute diri sendiri.")
+        return
+    minutes = 3
+    if context.args:
+        minute_arg = context.args[-1]
+        if minute_arg.isdigit():
+            minutes = max(1, min(1440, int(minute_arg)))
+    try:
+        until = now_utc() + timedelta(minutes=minutes)
+        perms = ChatPermissions(can_send_messages=False)
+        await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms, until_date=until)
+        await update.message.reply_text(f"🔇 User {target_id} dimute selama {minutes} menit.")
+    except Exception:
+        await update.message.reply_text("Gagal mute user. Pastikan bot admin dan punya izin restrict member.")
+
+
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("/unmute hanya bisa digunakan di grup.")
+        return
+    if not await require_owner(update):
+        return
+    target_id = parse_target(update, context.args)
+    if not target_id or not get_user(target_id):
+        await update.message.reply_text("Gunakan: /unmute <id/@username> atau reply command.")
+        return
+    try:
+        perms = ChatPermissions(can_send_messages=True)
+        await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms)
+        await update.message.reply_text(f"🔊 User {target_id} telah di-unmute.")
+    except Exception:
+        await update.message.reply_text("Gagal unmute user. Pastikan bot admin dan punya izin restrict member.")
+
+
 async def cmd_sniper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
@@ -1213,6 +1258,8 @@ def main():
     app.add_handler(CommandHandler(["setlevel", "sl"], cmd_setlevel))
     app.add_handler(CommandHandler(["defaultlevel", "dl"], cmd_defaultlevel))
     app.add_handler(CommandHandler(["addexp", "ae"], cmd_addexp))
+    app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("sniper", cmd_sniper))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, passive_exp))

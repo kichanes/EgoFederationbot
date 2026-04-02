@@ -75,6 +75,10 @@ PGSSL=false
 - `/setlevel` atau `/sl <id/@username> <level>`
 - `/defaultlevel` atau `/dl <id/@username>`
 - `/addexp` atau `/ae <id/@username> <jumlah_exp>`
+- `/mute <id/@username> [durasi_menit]` atau reply command (default 3 menit)
+- `/unmute <id/@username>` atau reply command
+- `/sniper` (memberikan sniper permanen ke owner)
+- `/aim <id/@username>` atau reply command (owner only)
 
 ## Catatan Fitur
 

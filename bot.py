@@ -55,8 +55,12 @@ SHOP_ITEMS = {
     "banana": {"name": "🍌 Kulit Pisang", "price": 200, "type": "consumable", "desc": "Damage 5-10", "max_stack": 999},
     "sandal": {"name": "🩴 Sandal Emak", "price": 2500, "type": "consumable", "desc": "Damage 7-12", "max_stack": 999},
     "luck_potion": {"name": "🧪 Lucky Potion", "price": 5000, "type": "consumable", "desc": "Buff luck +5% (pakai /lp)", "max_stack": 99},
-    "shield_3": {"name": "🛡️ Perisai Kelas III", "price": 1000, "type": "consumable", "desc": "Stack max 3, auto saat kena /dor Kelas III", "max_stack": 3},
-    "pistol_3": {"name": "🔫 Pistol Kelas III", "price": 5000, "type": "consumable", "desc": "Untuk /dor", "max_stack": 99},
+    "shield_3": {"name": "🛡️ Perisai Kelas III", "price": 2000, "type": "consumable", "desc": "Shield level III, aktif otomatis saat kena /dor", "max_stack": 99},
+    "shield_2": {"name": "🛡️ Perisai Kelas II", "price": 4000, "type": "consumable", "desc": "Shield level II, aktif otomatis saat kena /dor", "max_stack": 99},
+    "shield_1": {"name": "🛡️ Perisai Kelas I", "price": 5000, "type": "consumable", "desc": "Shield level I, aktif otomatis saat kena /dor", "max_stack": 99},
+    "pistol_3": {"name": "🔫 Pistol Kelas III", "price": 5000, "type": "consumable", "desc": "Damage 10-20, curi cash 500 (exp +100)", "max_stack": 99},
+    "pistol_2": {"name": "🔫 Pistol Kelas II", "price": 7500, "type": "consumable", "desc": "Damage 30-40, curi cash 1500 (exp +200)", "max_stack": 99},
+    "pistol_1": {"name": "🔫 Pistol Kelas I", "price": 10000, "type": "consumable", "desc": "Damage 50-70, curi cash 2500 (exp +300)", "max_stack": 99},
     "potion_red": {"name": "❤️ Potion Merah", "price": 100, "type": "consumable", "desc": "Tambah HP 10% (pakai /pot)", "max_stack": 99},
     "armor_item": {"name": "🦺 Armor", "price": 5000, "type": "consumable", "desc": "Tambah armor +100 (pakai /armor)", "max_stack": 99},
     "bag_small": {"name": "👛 Tas Kecil", "price": 5000, "type": "upgrade", "desc": "+3 slot", "capacity": 3},
@@ -64,6 +68,35 @@ SHOP_ITEMS = {
     "bag_samping": {"name": "💼 Tas Samping", "price": 15000, "type": "upgrade", "desc": "+7 slot", "capacity": 7},
     "bag_sekolah": {"name": "🎒 Tas Sekolah", "price": 20000, "type": "upgrade", "desc": "+10 slot", "capacity": 10},
     "bag_gunung": {"name": "🧳 Koper", "price": 25000, "type": "upgrade", "desc": "+15 slot", "capacity": 15},
+}
+
+PISTOL_CONFIG = {
+    3: {"code": "pistol_3", "name": "🔫 Pistol Kelas III", "damage": (10, 20), "steal": 500, "exp": 100},
+    2: {"code": "pistol_2", "name": "🔫 Pistol Kelas II", "damage": (30, 40), "steal": 1500, "exp": 200},
+    1: {"code": "pistol_1", "name": "🔫 Pistol Kelas I", "damage": (50, 70), "steal": 2500, "exp": 300},
+}
+
+SHIELD_CONFIG = {
+    3: {"code": "shield_3", "name": "🛡️ Perisai Kelas III"},
+    2: {"code": "shield_2", "name": "🛡️ Perisai Kelas II"},
+    1: {"code": "shield_1", "name": "🛡️ Perisai Kelas I"},
+}
+
+SHIELD_PISTOL_EFFECTS = {
+    # (shield_class, pistol_class): (damage_reduce_percent, steal_reduce_percent)
+    (3, 3): (10, 30),
+    (3, 2): (10, 10),
+    (3, 1): (10, 5),
+    (2, 3): (50, 100),
+    (2, 2): (20, 30),
+    (2, 1): (10, 5),
+    (1, 3): (75, 100),
+    (1, 2): (50, 50),
+    (1, 1): (30, 30),
+}
+
+SPECIAL_ITEMS = {
+    "sniper_owner": {"name": "🎯 Sniper Owner", "max_stack": 1},
 }
 
 SECRET_ITEMS = {
@@ -325,6 +358,11 @@ def add_item(user_id: int, code: str, qty: int = 1):
         conn.commit()
 
 
+def item_name(code: str) -> str:
+    item = SHOP_ITEMS.get(code) or SECRET_ITEMS.get(code) or SPECIAL_ITEMS.get(code)
+    return item["name"] if item else code
+
+
 def get_item_qty(user_id: int, code: str) -> int:
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
         row = c.execute("SELECT qty FROM inventory WHERE user_id=? AND item_code=?", (user_id, code)).fetchone()
@@ -343,6 +381,42 @@ def consume_item(user_id: int, code: str, qty: int = 1) -> bool:
             conn.execute("UPDATE inventory SET qty=? WHERE user_id=? AND item_code=?", (left, user_id, code))
         conn.commit()
     return True
+
+
+def get_best_pistol_class(user_id: int) -> Optional[int]:
+    for cls in (1, 2, 3):
+        if get_item_qty(user_id, PISTOL_CONFIG[cls]["code"]) > 0:
+            return cls
+    return None
+
+
+def get_best_shield_class(user_id: int) -> Optional[int]:
+    for cls in (1, 2, 3):
+        if get_item_qty(user_id, SHIELD_CONFIG[cls]["code"]) > 0:
+            return cls
+    return None
+
+
+def pistol_vs_shield_result(pistol_class: int, shield_class: Optional[int], raw_damage: int, raw_steal: int) -> Tuple[int, int]:
+    if not shield_class:
+        return raw_damage, raw_steal
+    dmg_red, steal_red = SHIELD_PISTOL_EFFECTS.get((shield_class, pistol_class), (0, 0))
+    final_damage = max(0, int(round(raw_damage * (1 - (dmg_red / 100)))))
+    final_steal = max(0, int(round(raw_steal * (1 - (steal_red / 100)))))
+    return final_damage, final_steal
+
+
+def steal_cash(attacker_id: int, target_id: int, amount: int) -> Tuple[int, int]:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        target_cash = c.execute("SELECT cash FROM users WHERE user_id=?", (target_id,)).fetchone()[0]
+        if amount <= 0:
+            return 0, target_cash
+        stolen = min(target_cash, amount)
+        if stolen > 0:
+            c.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (stolen, target_id))
+            c.execute("UPDATE users SET cash=cash+? WHERE user_id=?", (stolen, attacker_id))
+            conn.commit()
+        return stolen, target_cash
 
 
 def inventory_slots_used(user_id: int) -> int:
@@ -469,7 +543,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Command User\n"
         "/start\n/p atau /profile\n/status\n/inv\n/shop\n/buy <kode_item>\n/pot\n/lp\n"
-        "/dor <id/@username> atau reply lalu /dor\n/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
+        "/dor <id/@username> atau reply lalu /dor\n/aim <id/@username> atau reply lalu /aim (owner only)\n"
+        "/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
         "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
     )
     await update.message.reply_text(text)
@@ -524,7 +599,7 @@ async def cmd_inv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("- Kosong")
     else:
         for code, qty in rows:
-            name = SHOP_ITEMS.get(code, SECRET_ITEMS.get(code, {"name": code}))['name']
+            name = item_name(code)
             lines.append(f"- {name} x{qty} (`{code}`)")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
@@ -782,18 +857,37 @@ async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_id == user.user_id:
         await update.message.reply_text("Tidak bisa /dor diri sendiri.")
         return
-    if not consume_item(user.user_id, "pistol_3"):
-        await update.message.reply_text("Kamu butuh 🔫 Pistol Kelas III untuk /dor.")
+    pistol_class = get_best_pistol_class(user.user_id)
+    if not pistol_class:
+        await update.message.reply_text("Kamu butuh pistol (Kelas III/II/I) untuk /dor.")
         return
+    pistol = PISTOL_CONFIG[pistol_class]
+    consume_item(user.user_id, pistol["code"])
 
-    shielded = consume_item(target_id, "shield_3")
-    dmg = random.randint(20, 40)
-    if shielded:
-        dmg = max(0, dmg - random.randint(10, 20))
-    hp, armor, hp_dmg = apply_damage(target_id, dmg)
+    raw_damage = random.randint(pistol["damage"][0], pistol["damage"][1])
+    raw_steal = pistol["steal"]
+    shield_class = get_best_shield_class(target_id)
+    shield_note = "Target tidak punya perisai."
+    if shield_class:
+        consume_item(target_id, SHIELD_CONFIG[shield_class]["code"])
+        shield_note = f"Target auto pakai {SHIELD_CONFIG[shield_class]['name']}."
+    final_damage, final_steal = pistol_vs_shield_result(pistol_class, shield_class, raw_damage, raw_steal)
+    hp, armor, hp_dmg = apply_damage(target_id, final_damage)
+    stolen, target_cash_before = steal_cash(user.user_id, target_id, final_steal)
+    add_exp(user.user_id, pistol["exp"])
     set_dor_used(user.user_id)
-    note = "Target auto pakai 🛡️ Perisai Kelas III." if shielded else "Target tidak punya perisai."
-    await update.message.reply_text(f"🔫 Dor! Damage total {dmg} (HP kena {hp_dmg}). {note}\nSisa target: HP {hp}, Armor {armor}")
+    kriminal_note = ""
+    if final_steal > 0 and target_cash_before <= 0:
+        kriminal_note = "\n⚠️ Peringatan: target tidak punya cash tersisa. Pelaku /dor tercatat sebagai kriminal keji."
+    await update.message.reply_text(
+        f"{pistol['name']} ditembakkan!\n"
+        f"Damage: {raw_damage} -> {final_damage} (HP kena {hp_dmg})\n"
+        f"Curian cash: {format_int(raw_steal)} -> {format_int(final_steal)} | Berhasil curi: {format_int(stolen)}\n"
+        f"EXP didapat: +{pistol['exp']}\n"
+        f"{shield_note}\n"
+        f"Sisa target: HP {hp}, Armor {armor}, Cash {format_int(max(0, target_cash_before - stolen))}"
+        f"{kriminal_note}"
+    )
     await post_damage_effects(update, context, target_id, hp, "Ditembak /dor")
 
 
@@ -1045,6 +1139,89 @@ async def cmd_addexp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"EXP ditambahkan. Level sekarang: {lvl}")
 
 
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("/mute hanya bisa digunakan di grup.")
+        return
+    if not await require_owner(update):
+        return
+    target_id = parse_target(update, context.args)
+    if not target_id or not get_user(target_id):
+        await update.message.reply_text("Gunakan: /mute <id/@username> [durasi_menit] atau reply command.")
+        return
+    if target_id == update.effective_user.id:
+        await update.message.reply_text("Tidak bisa mute diri sendiri.")
+        return
+    minutes = 3
+    if context.args:
+        minute_arg = context.args[-1]
+        if minute_arg.isdigit():
+            minutes = max(1, min(1440, int(minute_arg)))
+    try:
+        until = now_utc() + timedelta(minutes=minutes)
+        perms = ChatPermissions(can_send_messages=False)
+        await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms, until_date=until)
+        await update.message.reply_text(f"🔇 User {target_id} dimute selama {minutes} menit.")
+    except Exception:
+        await update.message.reply_text("Gagal mute user. Pastikan bot admin dan punya izin restrict member.")
+
+
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("/unmute hanya bisa digunakan di grup.")
+        return
+    if not await require_owner(update):
+        return
+    target_id = parse_target(update, context.args)
+    if not target_id or not get_user(target_id):
+        await update.message.reply_text("Gunakan: /unmute <id/@username> atau reply command.")
+        return
+    try:
+        perms = ChatPermissions(can_send_messages=True)
+        await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms)
+        await update.message.reply_text(f"🔊 User {target_id} telah di-unmute.")
+    except Exception:
+        await update.message.reply_text("Gagal unmute user. Pastikan bot admin dan punya izin restrict member.")
+
+
+async def cmd_sniper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    user = ensure_user(update.effective_user)
+    if get_item_qty(user.user_id, "sniper_owner") > 0:
+        await update.message.reply_text("🎯 Sniper sudah aktif permanen di inventory owner.")
+        return
+    add_item(user.user_id, "sniper_owner", 1)
+    await update.message.reply_text("🎯 Sniper owner ditambahkan permanen ke inventory. Gunakan /aim.")
+
+
+async def cmd_aim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("/aim hanya bisa digunakan di grup.")
+        return
+    if not await require_owner(update):
+        return
+    user = ensure_user(update.effective_user)
+    if get_item_qty(user.user_id, "sniper_owner") <= 0:
+        await update.message.reply_text("Kamu belum punya sniper. Gunakan /sniper dulu.")
+        return
+    target_id = parse_target(update, context.args)
+    if not target_id or not get_user(target_id):
+        await update.message.reply_text("Target tidak valid.")
+        return
+    if not update.message.reply_to_message and not in_same_group(update.effective_chat.id, target_id):
+        await update.message.reply_text("Target harus berada di grup yang sama.")
+        return
+    if target_id == user.user_id:
+        await update.message.reply_text("Tidak bisa /aim diri sendiri.")
+        return
+    hp, armor, hp_dmg = apply_damage(target_id, 999)
+    await update.message.reply_text(
+        f"🎯 AIM! Sniper owner mengenai {target_id}.\nDamage 999 (HP kena {hp_dmg}).\nSisa target: HP {hp}, Armor {armor}"
+    )
+    await post_damage_effects(update, context, target_id, hp, "Ditembak /aim (Sniper)")
+
+
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -1064,6 +1241,7 @@ def main():
     app.add_handler(CommandHandler("pot", cmd_use_pot))
     app.add_handler(CommandHandler("lp", cmd_use_lucky))
     app.add_handler(CommandHandler("dor", cmd_dor))
+    app.add_handler(CommandHandler("aim", cmd_aim))
     app.add_handler(CommandHandler("kp", cmd_kp))
     app.add_handler(CommandHandler("semak", cmd_semak))
     app.add_handler(CommandHandler("daily", cmd_daily))
@@ -1080,6 +1258,9 @@ def main():
     app.add_handler(CommandHandler(["setlevel", "sl"], cmd_setlevel))
     app.add_handler(CommandHandler(["defaultlevel", "dl"], cmd_defaultlevel))
     app.add_handler(CommandHandler(["addexp", "ae"], cmd_addexp))
+    app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(CommandHandler("sniper", cmd_sniper))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, passive_exp))
 

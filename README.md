@@ -62,6 +62,9 @@ PGSSL=false
 - `/semak <id/@username>` atau reply lalu `/semak`
 - `/transfer <id_tujuan> <jumlah>`
 - `/tf <id_tujuan> <jumlah>`
+- `/bank`
+- `/deposit <jumlah>` atau `/dp <jumlah>`
+- `/withdraw <jumlah>` atau `/wd <jumlah>`
 - `/daily`
 - `/weekly`
 - `/cd`
@@ -97,7 +100,9 @@ PGSSL=false
   - 1 slot bubble `Next` untuk pindah ke page berikutnya.
 - Secret shop terbuka saat level >= 5.
 - `/help` dan `/ss` diarahkan ke chat pribadi bot.
+- `/bank` diarahkan ke chat pribadi bot.
 - Item secret shop dibeli menggunakan token.
+- Transfer antar user dikenakan pajak 10%.
 - Tambahan secret shop: Peti Rahasia, Bom, AWM, Nuklir, Anti Radiasi, Penjinak Bom, Armor Plus.
 - Daily reward: +150 cash +50 exp (premium double).
 - Weekly reward: +500 cash +250 exp +1 token +1 chest random (premium double reward/token).

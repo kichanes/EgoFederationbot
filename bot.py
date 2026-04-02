@@ -157,6 +157,24 @@ class UserData:
     premium: int
 
 
+KP_QUOTES = [
+    "Anying sia!",
+    "Goblog teh!",
+    "Mantog sia!",
+    "Ulin teu apal waktu, mantog!",
+    "Nyiaring nyiar pi bangusun!",
+    "Aing lak anjing sia, bangung teh sia rewot jeung aing!",
+]
+
+SEMAK_QUOTES = [
+    "Matane, cok!",
+    "Huelahdalah, opo iki cok!",
+    "Cangkeme o asu",
+    "Lah, iki opo sih cok!",
+    "O Asu, Sendal sopo iki cok!",
+]
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -204,6 +222,7 @@ def init_db() -> None:
                 armor INTEGER DEFAULT 0,
                 token INTEGER DEFAULT 0,
                 premium INTEGER DEFAULT 0,
+                bank_cash INTEGER DEFAULT 0,
                 daily_last_claim TEXT,
                 weekly_last_claim TEXT,
                 luck_buff_until TEXT,
@@ -214,6 +233,8 @@ def init_db() -> None:
         user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
         if "premium_until" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN premium_until TEXT")
+        if "bank_cash" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN bank_cash INTEGER DEFAULT 0")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -380,6 +401,16 @@ def item_name(code: str) -> str:
     return item["name"] if item else code
 
 
+def user_tag(user_id: int) -> str:
+    user = get_user(user_id)
+    if not user:
+        return "@unknown"
+    if user.username and user.username != "-":
+        return user.username
+    safe_name = "".join(ch for ch in user.name.lower().replace(" ", "_") if ch.isalnum() or ch == "_")
+    return f"@{safe_name[:20] or 'user'}"
+
+
 def get_item_qty(user_id: int, code: str) -> int:
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
         row = c.execute("SELECT qty FROM inventory WHERE user_id=? AND item_code=?", (user_id, code)).fetchone()
@@ -532,19 +563,20 @@ def set_dor_used(user_id: int):
 
 
 async def post_damage_effects(update: Update, context: ContextTypes.DEFAULT_TYPE, target_id: int, hp: int, cause: str):
+    target_tag = user_tag(target_id)
     if hp > 0:
         if hp < int(MAX_HP * 0.2):
             await update.message.reply_text(
-                f"⚠️ HP target ({target_id}) kritis (<20%). Segera beli /buy potion_red lalu pakai /pot."
+                f"⚠️ HP target ({target_tag}) kritis (<20%). Segera beli /buy potion_red lalu pakai /pot."
             )
         return
-    await update.message.reply_text(f"☠️ User {target_id} telah mati. Penyebab: {cause}.")
+    await update.message.reply_text(f"☠️ User {target_tag} telah mati. Penyebab: {cause}.")
     if update.effective_chat.type in {"group", "supergroup"}:
         try:
             until = now_utc() + timedelta(minutes=3)
             perms = ChatPermissions(can_send_messages=False)
             await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms, until_date=until)
-            await update.message.reply_text(f"🔇 User {target_id} dimute 3 menit karena mati.")
+            await update.message.reply_text(f"🔇 User {target_tag} dimute 3 menit karena mati.")
             if context.job_queue:
                 context.job_queue.run_once(
                     revive_after_mute,
@@ -570,7 +602,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/dor <id/@username> atau reply lalu /dor\n/aim <id/@username> atau reply lalu /aim (owner only)\n"
         "/bom <id/@username>\n/piw <id/@username>\n/dhuar\n"
         "/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
-        "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
+        "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n"
+        "/bank\n/deposit atau /dp <jumlah>\n/withdraw atau /wd <jumlah>\n"
+        "/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
     )
     if update.effective_chat.type == "private":
         await update.message.reply_text(text)
@@ -817,14 +851,66 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not get_user(target_id):
         await update.message.reply_text("User tujuan belum terdaftar.")
         return
+    tax = max(1, int(amount * 0.1))
+    received = amount - tax
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (amount, sender.user_id))
-        conn.execute("UPDATE users SET cash=cash+? WHERE user_id=?", (amount, target_id))
+        conn.execute("UPDATE users SET cash=cash+? WHERE user_id=?", (received, target_id))
         conn.commit()
     await update.message.reply_text(
-        f"_Transfer berhasil: {format_int(amount)} ke {target_id}_",
+        f"_Transfer berhasil: {format_int(amount)} ke ID {target_id} | Pajak 10%: {format_int(tax)} | Diterima: {format_int(received)}_",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    text = f"🏦 Bank {user.username}\nSaldo bank: {format_int(get_bank_cash(user.user_id))}\nCash dompet: {format_int(user.cash)}"
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(text)
+        return
+    try:
+        await context.bot.send_message(user.user_id, text)
+        await update.message.reply_text("📩 Saldo bank dikirim ke chat pribadi bot.")
+    except Exception:
+        await update.message.reply_text("Gagal kirim DM. Silakan start bot di private chat dulu, lalu ulangi /bank.")
+
+
+def get_bank_cash(user_id: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT bank_cash FROM users WHERE user_id=?", (user_id,)).fetchone()
+        return row[0] if row else 0
+
+
+async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Gunakan: /deposit <jumlah>")
+        return
+    amount = int(context.args[0])
+    if amount <= 0 or user.cash < amount:
+        await update.message.reply_text("Jumlah tidak valid / cash tidak cukup.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET cash=cash-?, bank_cash=bank_cash+? WHERE user_id=?", (amount, amount, user.user_id))
+        conn.commit()
+    await update.message.reply_text(f"🏦 Deposit berhasil: {format_int(amount)}")
+
+
+async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Gunakan: /withdraw <jumlah>")
+        return
+    amount = int(context.args[0])
+    bank_cash = get_bank_cash(user.user_id)
+    if amount <= 0 or bank_cash < amount:
+        await update.message.reply_text("Jumlah tidak valid / saldo bank tidak cukup.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET cash=cash+?, bank_cash=bank_cash-? WHERE user_id=?", (amount, amount, user.user_id))
+        conn.commit()
+    await update.message.reply_text(f"🏦 Withdraw berhasil: {format_int(amount)}")
 
 
 async def cmd_secretshop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -901,7 +987,7 @@ async def apply_nuke_debuff(target_id: int, chat_id: int, context: ContextTypes.
             conn.commit()
             if hp <= 0:
                 try:
-                    await context.bot.send_message(chat_id, f"☢️ User {target_id} tumbang karena radiasi nuklir.")
+                    await context.bot.send_message(chat_id, f"☢️ User {user_tag(target_id)} tumbang karena radiasi nuklir.")
                 except Exception:
                     pass
                 return
@@ -927,8 +1013,9 @@ async def cmd_bom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     steal_amount = random.randint(1000, 3000)
     hp, armor, hp_dmg = apply_damage(target_id, dmg)
     stolen, _ = steal_cash(user.user_id, target_id, steal_amount)
+    target_tag = user_tag(target_id)
     await update.message.reply_text(
-        f"💣 BOOM! Damage {dmg} (HP kena {hp_dmg}). Curi cash {format_int(stolen)}. EXP +500.\nSisa target: HP {hp}, Armor {armor}"
+        f"💣 BOOM ke {target_tag}! Damage {dmg} (HP kena {hp_dmg}). Curi cash {format_int(stolen)}. EXP +500.\nSisa target: HP {hp}, Armor {armor}"
     )
     await post_damage_effects(update, context, target_id, hp, "Kena /bom")
 
@@ -953,8 +1040,9 @@ async def cmd_piw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     steal_amount = random.randint(1000, 5000)
     hp, armor, hp_dmg = apply_damage(target_id, dmg)
     stolen, _ = steal_cash(user.user_id, target_id, steal_amount)
+    target_tag = user_tag(target_id)
     await update.message.reply_text(
-        f"🎯 PIW! Damage {dmg} (HP kena {hp_dmg}). Curi cash {format_int(stolen)}. EXP +1000.\nSisa target: HP {hp}, Armor {armor}"
+        f"🎯 PIW ke {target_tag}! Damage {dmg} (HP kena {hp_dmg}). Curi cash {format_int(stolen)}. EXP +1000.\nSisa target: HP {hp}, Armor {armor}"
     )
     await post_damage_effects(update, context, target_id, hp, "Kena /piw")
 
@@ -979,9 +1067,9 @@ async def cmd_dhuar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for tid in target_ids:
         hp, armor, hp_dmg = apply_damage(tid, 100)
         if consume_item(tid, "anti_radiation"):
-            lines.append(f"- {tid}: kena damage 100 (HP kena {hp_dmg}). Preet, Mati aja lu yang nge dhuar 😤")
+            lines.append(f"- {user_tag(tid)}: kena damage 100 (HP kena {hp_dmg}). Preet, Mati aja lu yang nge dhuar 😤")
         else:
-            lines.append(f"- {tid}: kena damage 100 (HP kena {hp_dmg}) + debuff radiasi 10 detik.")
+            lines.append(f"- {user_tag(tid)}: kena damage 100 (HP kena {hp_dmg}) + debuff radiasi 10 detik.")
             asyncio.create_task(apply_nuke_debuff(tid, update.effective_chat.id, context))
         await post_damage_effects(update, context, tid, hp, "Kena /dhuar")
     await update.message.reply_text("\n".join(lines))
@@ -1035,7 +1123,7 @@ def apply_damage(target_id: int, dmg: int) -> Tuple[int, int, int]:
         return hp, armor, remaining
 
 
-async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, min_dmg: int, max_dmg: int, label: str):
+async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, min_dmg: int, max_dmg: int, label: str, quotes: Optional[list[str]] = None):
     user = ensure_user(update.effective_user)
     if update.effective_chat.type in {"group", "supergroup"}:
         update_chat_member(update.effective_chat.id, user.user_id)
@@ -1054,16 +1142,18 @@ async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code:
         return
     dmg = random.randint(min_dmg, max_dmg)
     hp, armor, hp_dmg = apply_damage(target_id, dmg)
-    await update.message.reply_text(f"{label} dilempar ke {target_id}! Damage {dmg} (kena HP {hp_dmg}). Status target HP {hp}, Armor {armor}.")
+    target_tag = user_tag(target_id)
+    quote = f'\n💬 "{random.choice(quotes)}"' if quotes else ""
+    await update.message.reply_text(f"{label} dilempar ke {target_tag}! Damage {dmg} (kena HP {hp_dmg}). Status target HP {hp}, Armor {armor}.{quote}")
     await post_damage_effects(update, context, target_id, hp, f"Kena {label}")
 
 
 async def cmd_kp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await attack_throw(update, context, "banana", KP_DAMAGE_RANGE[0], KP_DAMAGE_RANGE[1], "🍌 Kulit Pisang")
+    await attack_throw(update, context, "banana", KP_DAMAGE_RANGE[0], KP_DAMAGE_RANGE[1], "🍌 Kulit Pisang", KP_QUOTES)
 
 
 async def cmd_semak(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await attack_throw(update, context, "sandal", SEMAK_DAMAGE_RANGE[0], SEMAK_DAMAGE_RANGE[1], "🩴 Sandal Emak")
+    await attack_throw(update, context, "sandal", SEMAK_DAMAGE_RANGE[0], SEMAK_DAMAGE_RANGE[1], "🩴 Sandal Emak", SEMAK_QUOTES)
 
 
 async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1108,8 +1198,9 @@ async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kriminal_note = ""
     if final_steal > 0 and target_cash_before <= 0:
         kriminal_note = "\n⚠️ Peringatan: target tidak punya cash tersisa. Pelaku /dor tercatat sebagai kriminal keji."
+    target_tag = user_tag(target_id)
     await update.message.reply_text(
-        f"{pistol['name']} ditembakkan!\n"
+        f"{pistol['name']} ditembakkan ke {target_tag}!\n"
         f"Damage: {raw_damage} -> {final_damage} (HP kena {hp_dmg})\n"
         f"Curian cash: {format_int(raw_steal)} -> {format_int(final_steal)} | Berhasil curi: {format_int(stolen)}\n"
         f"EXP didapat: +{pistol['exp']}\n"
@@ -1288,7 +1379,7 @@ async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
         hp_now, hp_max = await restore_hp_to_max(user_id)
         perms = ChatPermissions(can_send_messages=True)
         await context.bot.restrict_chat_member(chat_id, user_id, permissions=perms)
-        await context.bot.send_message(chat_id, f"❤️ User {user_id} pulih otomatis setelah mute. HP {hp_now}/{hp_max}.")
+        await context.bot.send_message(chat_id, f"❤️ User {user_tag(user_id)} pulih otomatis setelah mute. HP {hp_now}/{hp_max}.")
     except Exception:
         pass
 
@@ -1445,7 +1536,7 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         until = now_utc() + timedelta(minutes=minutes)
         perms = ChatPermissions(can_send_messages=False)
         await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms, until_date=until)
-        await update.message.reply_text(f"🔇 User {target_id} dimute selama {minutes} menit.")
+        await update.message.reply_text(f"🔇 User {user_tag(target_id)} dimute selama {minutes} menit.")
     except Exception:
         await update.message.reply_text("Gagal mute user. Pastikan bot admin dan punya izin restrict member.")
 
@@ -1465,7 +1556,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         perms = ChatPermissions(can_send_messages=True)
         await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms)
         hp_now, hp_max = await restore_hp_to_max(target_id)
-        await update.message.reply_text(f"🔊 User {target_id} telah di-unmute. HP dipulihkan {hp_now}/{hp_max}.")
+        await update.message.reply_text(f"🔊 User {user_tag(target_id)} telah di-unmute. HP dipulihkan {hp_now}/{hp_max}.")
     except Exception:
         await update.message.reply_text("Gagal unmute user. Pastikan bot admin dan punya izin restrict member.")
 
@@ -1502,8 +1593,9 @@ async def cmd_aim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Tidak bisa /aim diri sendiri.")
         return
     hp, armor, hp_dmg = apply_damage(target_id, 999)
+    target_tag = user_tag(target_id)
     await update.message.reply_text(
-        f"( -_•)ᡕᠵデᡁ᠊╾━💥 Target Lock!\nDamage 999 (HP kena {hp_dmg}).\nSisa target: HP {hp}, Armor {armor}"
+        f"( -_•)ᡕᠵデᡁ᠊╾━💥 Target Lock! ({target_tag})\nDamage 999 (HP kena {hp_dmg}).\nSisa target: HP {hp}, Armor {armor}"
     )
     await post_damage_effects(update, context, target_id, hp, "Ditembak /aim (Sniper)")
 
@@ -1526,6 +1618,9 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^buy:"))
     app.add_handler(CallbackQueryHandler(cb_shop_page, pattern=r"^shop:"))
     app.add_handler(CommandHandler(["transfer", "tf"], cmd_transfer))
+    app.add_handler(CommandHandler("bank", cmd_bank))
+    app.add_handler(CommandHandler(["deposit", "dp"], cmd_deposit))
+    app.add_handler(CommandHandler(["withdraw", "wd"], cmd_withdraw))
     app.add_handler(CommandHandler("pot", cmd_use_pot))
     app.add_handler(CommandHandler("lp", cmd_use_lucky))
     app.add_handler(CommandHandler("dor", cmd_dor))

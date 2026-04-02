@@ -572,7 +572,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
         "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
     )
-    await update.message.reply_text(text)
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(text)
+        return
+    try:
+        await context.bot.send_message(update.effective_user.id, text)
+        await update.message.reply_text("📩 Daftar command dikirim ke chat pribadi bot.")
+    except Exception:
+        await update.message.reply_text("Gagal kirim DM. Silakan start bot di private chat dulu, lalu ulangi /help.")
 
 
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -822,6 +829,9 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_secretshop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("🔒 Gunakan /ss di chat pribadi bot ya.")
+        return
     if user.level < 5:
         await update.message.reply_text("🔒 Secret shop terbuka saat level 5.")
         return
@@ -1297,6 +1307,26 @@ async def cmd_addcoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("OK")
 
 
+async def cmd_addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    if len(context.args) != 2 or not context.args[1].isdigit():
+        await update.message.reply_text("/addtoken <id/@username> <jumlah>")
+        return
+    uid = resolve_user_by_ref(context.args[0])
+    amt = int(context.args[1])
+    if not uid or not get_user(uid):
+        await update.message.reply_text("User tidak ditemukan")
+        return
+    if amt <= 0:
+        await update.message.reply_text("Jumlah token harus lebih dari 0.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET token=token+? WHERE user_id=?", (amt, uid))
+        conn.commit()
+    await update.message.reply_text(f"Token ditambahkan: +{amt} ke {uid}")
+
+
 async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
@@ -1513,6 +1543,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
 
     app.add_handler(CommandHandler(["addcoin", "ac"], cmd_addcoin))
+    app.add_handler(CommandHandler(["addtoken", "at"], cmd_addtoken))
     app.add_handler(CommandHandler(["premiumuser", "pu"], cmd_premium))
     app.add_handler(CommandHandler(["setrole", "sr"], cmd_setrole))
     app.add_handler(CommandHandler(["clearrole", "cr"], cmd_clearrole))

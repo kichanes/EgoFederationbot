@@ -73,6 +73,7 @@ PGSSL=false
 ## Command Owner (hanya dokumentasi README)
 
 - `/addcoin` atau `/ac <id_user> <jumlah>`
+- `/addtoken` atau `/at <id/@username> <jumlah>`
 - `/premiumuser` atau `/pu <id/@username> <durasi>`
   - durasi: `1m`, `3m`, `6m`, `12m`, atau `1y`
 - `/setrole` atau `/sr <id/@username> <role>`
@@ -95,6 +96,7 @@ PGSSL=false
   - 4 slot item per page
   - 1 slot bubble `Next` untuk pindah ke page berikutnya.
 - Secret shop terbuka saat level >= 5.
+- `/help` dan `/ss` diarahkan ke chat pribadi bot.
 - Item secret shop dibeli menggunakan token.
 - Tambahan secret shop: Peti Rahasia, Bom, AWM, Nuklir, Anti Radiasi, Penjinak Bom, Armor Plus.
 - Daily reward: +150 cash +50 exp (premium double).

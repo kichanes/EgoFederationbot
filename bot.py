@@ -3,6 +3,7 @@ import os
 import random
 import sqlite3
 import asyncio
+import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -322,6 +323,24 @@ def init_db() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shop_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                item_code TEXT NOT NULL,
+                currency_type TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                before_balance INTEGER NOT NULL,
+                after_balance INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_shop_tx_user_created ON shop_transactions(user_id, created_at DESC)")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shop_tx_idem ON shop_transactions(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL")
         seed_items = []
         idx = 1
         for code, item in SHOP_ITEMS.items():
@@ -350,6 +369,45 @@ def get_user(user_id: int) -> Optional[UserData]:
         if not row:
             return None
         return UserData(*row[:14])
+
+
+def get_balance(user_id: int, currency: str) -> int:
+    field = "token" if currency == "token" else "cash"
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(f"SELECT {field} FROM users WHERE user_id=?", (user_id,)).fetchone()
+        return int(row[0]) if row else 0
+
+
+def log_shop_transaction(
+    user_id: int,
+    item_code: str,
+    currency_type: str,
+    amount: int,
+    before_balance: int,
+    after_balance: int,
+    status: str,
+    idempotency_key: Optional[str] = None,
+):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO shop_transactions
+            (user_id, item_code, currency_type, amount, before_balance, after_balance, status, idempotency_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                item_code,
+                currency_type,
+                amount,
+                before_balance,
+                after_balance,
+                status,
+                idempotency_key,
+                now_utc().isoformat(),
+            ),
+        )
+        conn.commit()
 
 
 def ensure_user(tg_user) -> UserData:
@@ -780,12 +838,13 @@ async def send_shop_page(update: Update, user: UserData, page: int, from_callbac
     for code, name, _type, price_raw, _desc, is_secret in chunk:
         item = SHOP_ITEMS.get(code) or SECRET_ITEMS.get(code) or {}
         token_price = item.get("token_price")
+        buy_key = uuid.uuid4().hex[:8]
         if is_secret and token_price is not None:
             label = f"{name} ({token_price} token)"
         else:
             price = discount_price(user, price_raw)
             label = f"{name} ({format_int(price)})"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"buy:{code}")])
+        buttons.append([InlineKeyboardButton(label, callback_data=f"buy:{code}:{buy_key}")])
 
     if total_pages > 1:
         buttons.append([InlineKeyboardButton("➡️ Next", callback_data=f"shop:{page + 1}")])
@@ -806,7 +865,7 @@ async def cb_shop_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_shop_page(update, user, page=page, from_callback=True)
 
 
-async def buy_item(user: UserData, code: str) -> str:
+async def buy_item(user: UserData, code: str, idempotency_key: Optional[str] = None) -> str:
     with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
         row = c.execute(
             "SELECT name, type, price, description, is_secret FROM shop_catalog WHERE code=?",
@@ -823,12 +882,25 @@ async def buy_item(user: UserData, code: str) -> str:
         return "Item belum dipetakan ke gameplay."
 
     token_price = item.get("token_price")
+    currency_type = "token" if is_secret and token_price is not None else "cash"
+    amount = token_price if currency_type == "token" else discount_price(user, base_price)
+    if idempotency_key:
+        with sqlite3.connect(DB_PATH) as conn:
+            tx = conn.execute(
+                "SELECT status FROM shop_transactions WHERE user_id=? AND idempotency_key=?",
+                (user.user_id, idempotency_key),
+            ).fetchone()
+        if tx:
+            return "Pembelian ini sudah diproses sebelumnya."
+    before_balance = get_balance(user.user_id, currency_type)
     if is_secret and token_price is not None:
         if user.token < token_price:
+            log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
             return "Token kamu tidak cukup."
     else:
         price = discount_price(user, base_price)
         if user.cash < price:
+            log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
             return "Cash kamu tidak cukup."
 
     if item_type == "upgrade":
@@ -836,10 +908,20 @@ async def buy_item(user: UserData, code: str) -> str:
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
             exists = c.execute("SELECT 1 FROM bag_upgrades WHERE user_id=? AND item_code=?", (user.user_id, code)).fetchone()
             if exists:
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_duplicate_upgrade", idempotency_key)
                 return "Upgrade tas ini sudah pernah dibeli."
             c.execute("INSERT INTO bag_upgrades (user_id, item_code) VALUES (?, ?)", (user.user_id, code))
-            c.execute("UPDATE users SET cash=cash-?, inventory_capacity=inventory_capacity+? WHERE user_id=?", (price, item['capacity'], user.user_id))
+            updated = c.execute(
+                "UPDATE users SET cash=cash-?, inventory_capacity=inventory_capacity+? WHERE user_id=? AND cash>=?",
+                (price, item['capacity'], user.user_id, price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
+                return "Cash kamu tidak cukup."
             conn.commit()
+        after_balance = get_balance(user.user_id, currency_type)
+        log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, after_balance, "success", idempotency_key)
         return f"Berhasil beli {name}. Kapasitas inventory +{item['capacity']}."
 
     if code == "armor_item":
@@ -847,56 +929,81 @@ async def buy_item(user: UserData, code: str) -> str:
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
             armor_now = c.execute("SELECT armor FROM users WHERE user_id=?", (user.user_id,)).fetchone()[0]
             if armor_now >= MAX_ARMOR:
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_armor_full", idempotency_key)
                 return "Armor kamu masih penuh (100/100), tidak bisa beli armor lagi sekarang."
-            conn.execute(
-                "UPDATE users SET cash=cash-?, armor=? WHERE user_id=?",
-                (price, MAX_ARMOR, user.user_id),
+            updated = conn.execute(
+                "UPDATE users SET cash=cash-?, armor=? WHERE user_id=? AND cash>=?",
+                (price, MAX_ARMOR, user.user_id, price),
             )
+            if updated.rowcount == 0:
+                conn.rollback()
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
+                return "Cash kamu tidak cukup."
             conn.commit()
+        after_balance = get_balance(user.user_id, currency_type)
+        log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, after_balance, "success", idempotency_key)
         return f"Berhasil beli 🦺 Armor. Armor diisi ulang ke {MAX_ARMOR}/{MAX_ARMOR}."
 
     if code == "random_chest":
         today = today_wib_str()
-        with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
-            count_row = c.execute(
-                "SELECT random_chest_buy_count, random_chest_buy_date FROM users WHERE user_id=?",
-                (user.user_id,),
-            ).fetchone()
-            daily_count, last_buy_date = count_row if count_row else (0, None)
-            if last_buy_date != today:
-                daily_count = 0
-            if daily_count >= 5:
-                return "⚠️ Random Chest hanya bisa dibeli 5 kali per hari. Coba lagi besok."
-
         luck_rate = get_luck_buff_rate(user.user_id)
         chest_tier = roll_chest_tier(luck_rate)
         reward = CHEST_REWARDS[chest_tier]
         token_bonus = random.randint(reward["token"][0], reward["token"][1])
         got_items = []
-        for item_code in reward["items"]:
-            add_item(user.user_id, item_code, 1)
-            got_items.append(item_name(item_code))
+        reward_item_codes = list(reward["items"])
         bonus_awm = reward.get("bonus_awm_chance")
         if bonus_awm and random.random() <= bonus_awm:
-            add_item(user.user_id, "awm_item", 1)
-            got_items.append(item_name("awm_item"))
+            reward_item_codes.append("awm_item")
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE users
-                SET cash=cash-?,
-                    cash=cash+?,
+                SET cash=cash-?+?,
                     token=token+?,
-                    random_chest_buy_count=?,
+                    random_chest_buy_count=
+                        CASE
+                            WHEN random_chest_buy_date=? THEN random_chest_buy_count+1
+                            ELSE 1
+                        END,
                     random_chest_buy_date=?
                 WHERE user_id=?
+                  AND cash>=?
+                  AND (CASE WHEN random_chest_buy_date=? THEN random_chest_buy_count ELSE 0 END) < 5
                 """,
-                (price, reward["cash"], token_bonus, daily_count + 1, today, user.user_id),
+                (price, reward["cash"], token_bonus, today, today, user.user_id, price, today),
             )
+            if updated.rowcount == 0:
+                conn.rollback()
+                reason_row = conn.execute(
+                    "SELECT cash, random_chest_buy_count, random_chest_buy_date FROM users WHERE user_id=?",
+                    (user.user_id,),
+                ).fetchone()
+                if not reason_row:
+                    log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_user_not_found", idempotency_key)
+                    return "User tidak ditemukan."
+                cash_now, daily_count, last_buy_date = reason_row
+                effective_count = daily_count if last_buy_date == today else 0
+                if effective_count >= 5:
+                    log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_daily_limit", idempotency_key)
+                    return "⚠️ Random Chest hanya bisa dibeli 5 kali per hari. Coba lagi besok."
+                if cash_now < price:
+                    log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
+                    return "Cash kamu tidak cukup."
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_unknown", idempotency_key)
+                return "Gagal memproses pembelian Random Chest. Coba lagi."
+            for item_code in reward_item_codes:
+                conn.execute(
+                    "INSERT INTO inventory (user_id, item_code, qty) VALUES (?, ?, 1) ON CONFLICT(user_id, item_code) DO UPDATE SET qty=qty+1",
+                    (user.user_id, item_code),
+                )
+                got_items.append(item_name(item_code))
             conn.commit()
+        after_balance = get_balance(user.user_id, currency_type)
+        log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, after_balance, "success", idempotency_key)
         luck_note = f" (Lucky +{luck_rate}% aktif)" if luck_rate > 0 else ""
         item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
-        return f"Berhasil beli 🎁 Random Chest dan langsung dibuka!\nChest {chest_tier}{luck_note}: +{reward['cash']} cash, +{token_bonus} token{item_note}"
+        return f"Berhasil beli 🎁 Random Chest dan langsung dibuka!\nChest {chest_tier}{luck_note}: +{reward['cash']} cash, +{token_bonus} token{item_note}\nSisa {currency_type}: {format_int(after_balance)}"
 
     if inventory_slots_used(user.user_id) >= user.inventory_capacity and get_item_qty(user.user_id, code) == 0:
         return "Inventory penuh. Upgrade tas dulu di shop."
@@ -904,22 +1011,39 @@ async def buy_item(user: UserData, code: str) -> str:
     max_stack = item.get("max_stack", 999)
     current = get_item_qty(user.user_id, code)
     if current >= max_stack:
+        log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_max_stack", idempotency_key)
         return f"Stack {name} sudah maksimum ({max_stack})."
 
     with sqlite3.connect(DB_PATH) as conn:
         if is_secret and token_price is not None:
-            conn.execute("UPDATE users SET token=token-? WHERE user_id=?", (token_price, user.user_id))
+            updated = conn.execute(
+                "UPDATE users SET token=token-? WHERE user_id=? AND token>=?",
+                (token_price, user.user_id, token_price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
+                return "Token kamu tidak cukup."
         else:
             price = discount_price(user, base_price)
-            conn.execute("UPDATE users SET cash=cash-? WHERE user_id=?", (price, user.user_id))
+            updated = conn.execute(
+                "UPDATE users SET cash=cash-? WHERE user_id=? AND cash>=?",
+                (price, user.user_id, price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
+                return "Cash kamu tidak cukup."
         conn.execute(
             "INSERT INTO inventory (user_id, item_code, qty) VALUES (?, ?, 1) ON CONFLICT(user_id, item_code) DO UPDATE SET qty=qty+1",
             (user.user_id, code),
         )
         conn.commit()
+    after_balance = get_balance(user.user_id, currency_type)
+    log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, after_balance, "success", idempotency_key)
     if is_secret and token_price is not None:
-        return f"Berhasil beli {name} pakai {token_price} token."
-    return f"Berhasil beli {name}."
+        return f"Berhasil beli {name} pakai {token_price} token. Sisa token: {format_int(after_balance)}"
+    return f"Berhasil beli {name}. Sisa cash: {format_int(after_balance)}"
 
 
 async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -935,8 +1059,10 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = ensure_user(query.from_user)
-    _, code = query.data.split(":", 1)
-    res = await buy_item(user, code)
+    payload = query.data.split(":")
+    code = payload[1] if len(payload) > 1 else ""
+    idem_key = payload[2] if len(payload) > 2 else None
+    res = await buy_item(user, code, idempotency_key=idem_key)
     await query.message.reply_text(res)
 
 
@@ -1618,6 +1744,39 @@ async def cmd_addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Token ditambahkan: +{amt} ke {uid}")
 
 
+async def cmd_auditbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("/auditbuy <id/@username>")
+        return
+    uid = resolve_user_by_ref(context.args[0])
+    if not uid or not get_user(uid):
+        await update.message.reply_text("User tidak ditemukan")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT item_code, currency_type, amount, before_balance, after_balance, status, created_at
+            FROM shop_transactions
+            WHERE user_id=?
+            ORDER BY id DESC
+            LIMIT 10
+            """,
+            (uid,),
+        ).fetchall()
+    if not rows:
+        await update.message.reply_text("Belum ada transaksi shop untuk user ini.")
+        return
+    lines = [f"🧾 10 transaksi terakhir user {uid}:"]
+    for code, currency, amount, before, after, status, created_at in rows:
+        ts = datetime.fromisoformat(created_at).astimezone(WIB).strftime("%Y-%m-%d %H:%M:%S")
+        lines.append(
+            f"- {ts} | {code} | {currency} {format_int(amount)} | {format_int(before)} -> {format_int(after)} | {status}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_heal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
@@ -1886,6 +2045,7 @@ def main():
 
     app.add_handler(CommandHandler(["addcoin", "ac"], cmd_addcoin))
     app.add_handler(CommandHandler(["addtoken", "at"], cmd_addtoken))
+    app.add_handler(CommandHandler("auditbuy", cmd_auditbuy))
     app.add_handler(CommandHandler("heal", cmd_heal))
     app.add_handler(CommandHandler(["premiumuser", "pu"], cmd_premium))
     app.add_handler(CommandHandler(["setrole", "sr"], cmd_setrole))

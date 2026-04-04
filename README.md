@@ -106,7 +106,7 @@ PGSSL=false
 - EXP grup otomatis: 1 chat = random 5-15 EXP, cooldown 5 menit.
 - Inventory default 5 slot + upgrade tas one-time per jenis.
 - HP/Armor + alert otomatis saat HP < 20%.
-- Saat user mati di grup: user dimute 3 menit, lalu bot otomatis jalankan alur unmute (setara `/unmute`) dan memulihkan HP ke max.
+- Saat user mati di grup: user **tidak dimute**, HP langsung dipulihkan ke max, lalu masuk cooldown combat 3 menit (tidak bisa menyerang dan tidak bisa diserang).
 - Shop menampilkan list sederhana (nama item + harga) dengan bubble:
   - 4 slot item per page
   - 1 slot bubble `Next` untuk pindah ke page berikutnya.

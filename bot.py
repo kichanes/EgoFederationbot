@@ -41,6 +41,7 @@ WEEKLY_COOLDOWN = 7 * 24 * 3600
 KP_DAMAGE_RANGE = (5, 10)
 SEMAK_DAMAGE_RANGE = (5, 10)
 DOR_COOLDOWN_SECONDS = 60
+DEATH_COMBAT_COOLDOWN_SECONDS = 180
 
 ROLE_RANGES = [
     (1, 5, "💩 Manusia Antah Berantah"), (6, 10, "👩🏿‍🦲 Super Gembel"), (11, 15, "👩🏾‍🦲 Gembel"),
@@ -296,6 +297,8 @@ def init_db() -> None:
             c.execute("ALTER TABLE users ADD COLUMN random_chest_buy_count INTEGER DEFAULT 0")
         if "random_chest_buy_date" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN random_chest_buy_date TEXT")
+        if "death_cooldown_until" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN death_cooldown_until TEXT")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_catalog (
@@ -760,6 +763,45 @@ def set_dor_used(user_id: int):
         conn.commit()
 
 
+def death_cooldown_remaining(user_id: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT death_cooldown_until FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row or not row[0]:
+            return 0
+        until = datetime.fromisoformat(row[0])
+        remain = int((until - now_utc()).total_seconds())
+        if remain > 0:
+            return remain
+        c.execute("UPDATE users SET death_cooldown_until=NULL WHERE user_id=?", (user_id,))
+        conn.commit()
+        return 0
+
+
+def activate_death_cooldown(user_id: int, seconds: int = DEATH_COMBAT_COOLDOWN_SECONDS) -> Tuple[int, int]:
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        hp_max = c.execute("SELECT hp_max FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+        until = now_utc() + timedelta(seconds=seconds)
+        c.execute("UPDATE users SET hp=?, death_cooldown_until=? WHERE user_id=?", (hp_max, until.isoformat(), user_id))
+        conn.commit()
+        return hp_max, seconds
+
+
+async def ensure_can_attack(update: Update, user_id: int) -> bool:
+    remain = death_cooldown_remaining(user_id)
+    if remain <= 0:
+        return True
+    await update.message.reply_text(f"⏳ Kamu masih cooldown pasca-mati {remain} detik, belum bisa menyerang.")
+    return False
+
+
+async def ensure_target_attackable(update: Update, target_id: int) -> bool:
+    remain = death_cooldown_remaining(target_id)
+    if remain <= 0:
+        return True
+    await update.message.reply_text(f"🛡️ Target {user_tag(target_id)} sedang cooldown pasca-mati ({remain} detik), tidak bisa diserang.")
+    return False
+
+
 async def post_damage_effects(update: Update, context: ContextTypes.DEFAULT_TYPE, target_id: int, hp: int, cause: str):
     target_tag = user_tag(target_id)
     if hp > 0:
@@ -768,25 +810,11 @@ async def post_damage_effects(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"⚠️ HP target ({target_tag}) kritis (<20%). Segera beli /buy potion_red lalu pakai /pot."
             )
         return
+    hp_now, cooldown_sec = activate_death_cooldown(target_id)
     await update.message.reply_text(
         f"☠️ User {target_tag} telah mati. Penyebab: {cause}.\n"
-        "⚠️ Kamu mati, jadi tidak bisa memakai command sampai HP dipulihkan."
+        f"❤️ HP dipulihkan ke {hp_now}. User masuk cooldown combat {cooldown_sec} detik (tidak bisa menyerang/diserang)."
     )
-    if update.effective_chat.type in {"group", "supergroup"}:
-        try:
-            until = now_utc() + timedelta(minutes=3)
-            perms = ChatPermissions(can_send_messages=False)
-            await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms, until_date=until)
-            await update.message.reply_text(f"🔇 User {target_tag} dimute 3 menit karena mati.")
-            if context.job_queue:
-                context.job_queue.run_once(
-                    revive_after_mute,
-                    when=180,
-                    data={"chat_id": update.effective_chat.id, "user_id": target_id},
-                    name=f"revive_{update.effective_chat.id}_{target_id}",
-                )
-        except Exception:
-            await update.message.reply_text("Tidak bisa mute target (cek izin bot sebagai admin).")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -925,6 +953,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rad_until = datetime.fromisoformat(rad)
         if now_utc() < rad_until:
             debuff = f"☢️ Radiasi aktif ({str(rad_until - now_utc()).split('.')[0]})"
+    death_cd = death_cooldown_remaining(user.user_id)
+    if death_cd > 0:
+        debuff = f"🕒 Cooldown pasca-mati aktif ({death_cd} detik)."
     if user.hp < int(user.hp_max * 0.2):
         debuff = "⚠️ HP kritis (<20%)"
     buff = ", ".join(buff_list) if buff_list else "Tidak ada"
@@ -1381,6 +1412,8 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def apply_nuke_debuff(target_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    if death_cooldown_remaining(target_id) > 0:
+        return
     until = now_utc() + timedelta(seconds=10)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE users SET radiation_until=? WHERE user_id=?", (until.isoformat(), target_id))
@@ -1388,6 +1421,8 @@ async def apply_nuke_debuff(target_id: int, chat_id: int, context: ContextTypes.
     for _ in range(10):
         await asyncio.sleep(1)
         with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+            if death_cooldown_remaining(target_id) > 0:
+                return
             row = c.execute("SELECT hp, hp_max FROM users WHERE user_id=?", (target_id,)).fetchone()
             if not row:
                 return
@@ -1408,9 +1443,13 @@ async def apply_nuke_debuff(target_id: int, chat_id: int, context: ContextTypes.
 
 async def cmd_bom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
+    if not await ensure_can_attack(update, user.user_id):
+        return
     target_id = parse_target(update, context.args)
     if not target_id or not get_user(target_id):
         await update.message.reply_text("Target tidak valid.")
+        return
+    if not await ensure_target_attackable(update, target_id):
         return
     if target_id == user.user_id:
         await update.message.reply_text("Tidak bisa /bom diri sendiri.")
@@ -1435,9 +1474,13 @@ async def cmd_bom(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_piw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
+    if not await ensure_can_attack(update, user.user_id):
+        return
     target_id = parse_target(update, context.args)
     if not target_id or not get_user(target_id):
         await update.message.reply_text("Target tidak valid.")
+        return
+    if not await ensure_target_attackable(update, target_id):
         return
     if target_id == user.user_id:
         await update.message.reply_text("Tidak bisa /piw diri sendiri.")
@@ -1465,6 +1508,8 @@ async def cmd_dhuar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/dhuar hanya bisa digunakan di grup.")
         return
     user = ensure_user(update.effective_user)
+    if not await ensure_can_attack(update, user.user_id):
+        return
     if not consume_item(user.user_id, "nuke_item"):
         await update.message.reply_text("Kamu tidak punya ☢️ Nuklir.")
         return
@@ -1478,6 +1523,9 @@ async def cmd_dhuar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["☢️ DHUAR! Nuklir meledak!"]
     for tid in target_ids:
+        if death_cooldown_remaining(tid) > 0:
+            lines.append(f"- {user_tag(tid)}: sedang cooldown pasca-mati, aman dari serangan.")
+            continue
         hp, armor, hp_dmg = apply_damage(tid, 100)
         if consume_item(tid, "anti_radiation"):
             lines.append(f"- {user_tag(tid)}: kena damage 100 (HP kena {hp_dmg}). Preet, Mati aja lu yang nge dhuar 😤")
@@ -1583,6 +1631,8 @@ def apply_damage(target_id: int, dmg: int) -> Tuple[int, int, int]:
 
 async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, min_dmg: int, max_dmg: int, label: str, quotes: Optional[list[str]] = None):
     user = ensure_user(update.effective_user)
+    if not await ensure_can_attack(update, user.user_id):
+        return
     if update.effective_chat.type in {"group", "supergroup"}:
         update_chat_member(update.effective_chat.id, user.user_id)
     target_id = parse_target(update, context.args)
@@ -1594,6 +1644,8 @@ async def attack_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, code:
         return
     if target_id == user.user_id:
         await update.message.reply_text("Tidak bisa menyerang diri sendiri.")
+        return
+    if not await ensure_target_attackable(update, target_id):
         return
     if not consume_item(user.user_id, code):
         await update.message.reply_text(f"Kamu tidak punya {label}.")
@@ -1619,6 +1671,8 @@ async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/dor hanya bisa digunakan di grup.")
         return
     user = ensure_user(update.effective_user)
+    if not await ensure_can_attack(update, user.user_id):
+        return
     update_chat_member(update.effective_chat.id, user.user_id)
     remain_cd = check_dor_cooldown(user.user_id)
     if remain_cd is not None:
@@ -1627,6 +1681,8 @@ async def cmd_dor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_id = parse_target(update, context.args)
     if not target_id or not get_user(target_id):
         await update.message.reply_text("Target tidak valid.")
+        return
+    if not await ensure_target_attackable(update, target_id):
         return
     if not update.message.reply_to_message and not in_same_group(update.effective_chat.id, target_id):
         await update.message.reply_text("Target harus berada di grup yang sama.")
@@ -1884,21 +1940,12 @@ async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
 async def handle_death_background(chat_id: int, target_id: int, context: ContextTypes.DEFAULT_TYPE, cause: str):
     tag = user_tag(target_id)
     try:
+        hp_now, cooldown_sec = activate_death_cooldown(target_id)
         await context.bot.send_message(
             chat_id,
             f"☠️ User {tag} telah mati. Penyebab: {cause}.\n"
-            "⚠️ Kamu mati, jadi tidak bisa memakai command sampai HP dipulihkan.",
+            f"❤️ HP dipulihkan ke {hp_now}. Cooldown combat {cooldown_sec} detik aktif.",
         )
-        until = now_utc() + timedelta(minutes=3)
-        perms = ChatPermissions(can_send_messages=False)
-        await context.bot.restrict_chat_member(chat_id, target_id, permissions=perms, until_date=until)
-        if context.job_queue:
-            context.job_queue.run_once(
-                revive_after_mute,
-                when=180,
-                data={"chat_id": chat_id, "user_id": target_id},
-                name=f"revive_{chat_id}_{target_id}",
-            )
     except Exception:
         pass
 
@@ -2313,12 +2360,16 @@ async def cmd_aim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
     user = ensure_user(update.effective_user)
+    if not await ensure_can_attack(update, user.user_id):
+        return
     if get_item_qty(user.user_id, "sniper_owner") <= 0:
         await update.message.reply_text("Kamu belum punya sniper. Gunakan /sniper dulu.")
         return
     target_id = parse_target(update, context.args)
     if not target_id or not get_user(target_id):
         await update.message.reply_text("Target tidak valid.")
+        return
+    if not await ensure_target_attackable(update, target_id):
         return
     if not update.message.reply_to_message and not in_same_group(update.effective_chat.id, target_id):
         await update.message.reply_text("Target harus berada di grup yang sama.")

@@ -888,8 +888,8 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Level : {target.level} ({target.exp}/{exp_needed(target.level)})\n"
         f"Role : {target.role or '-'}\n"
         f"Premium : {premium_text}\n"
-        f"Register Date : _{dt.strftime('%Y-%m-%d')}_\n"
-        f"Time : _{now.strftime('%H:%M:%S WIB')}_"
+        f"Register Date : {dt.strftime('%Y-%m-%d')}\n"
+        f"Time : {now.strftime('%H:%M:%S WIB')}"
     )
     premium_buttons = InlineKeyboardMarkup(
         [[
@@ -898,7 +898,7 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Buy Cash", url="https://t.me/Noturkichan"),
         ]]
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=premium_buttons)
+    await update.message.reply_text(msg, reply_markup=premium_buttons)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):

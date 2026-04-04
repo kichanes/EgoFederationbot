@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 WIB = timezone(timedelta(hours=7))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 OWNER_IDS = {int(x.strip()) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
-INITIAL_CASH = 1000
+INITIAL_CASH = 5000
 EXP_MIN = 5
 EXP_MAX = 15
 EXP_COOLDOWN_SECONDS = 300
@@ -75,6 +75,7 @@ SHOP_ITEMS = {
     "bag_samping": {"name": "💼 Tas Samping", "price": 15000, "type": "upgrade", "desc": "+7 slot", "capacity": 7},
     "bag_sekolah": {"name": "🎒 Tas Sekolah", "price": 20000, "type": "upgrade", "desc": "+10 slot", "capacity": 10},
     "bag_gunung": {"name": "🧳 Koper", "price": 25000, "type": "upgrade", "desc": "+15 slot", "capacity": 15},
+    "premium_1w": {"name": "⭐ Premium 1W", "price": 50000, "type": "service", "desc": "Aktif premium 1 minggu (7 hari)"},
 }
 
 PISTOL_CONFIG = {
@@ -104,6 +105,41 @@ SHIELD_PISTOL_EFFECTS = {
 
 SPECIAL_ITEMS = {
     "sniper_owner": {"name": "🎯 Sniper Owner", "max_stack": 1},
+}
+
+REDEEM_DEFAULT_REWARDS = {
+    "token": ("token", 1),
+    "random chest": ("item", ("random_chest", 1)),
+    "random_chest": ("item", ("random_chest", 1)),
+    "cash": ("cash", 5000),
+    "exp": ("exp", 100),
+    "kunci rahasia": ("item", ("chest_key", 1)),
+    "peti rahasia": ("item", ("secret_chest", 1)),
+}
+
+ITEM_ALIASES = {
+    "kulit pisang": "banana",
+    "sandal emak": "sandal",
+    "ramal": "ramal_scroll",
+    "lucky potion": "luck_potion",
+    "luck potion med": "luck_potion_med",
+    "random chest": "random_chest",
+    "perisai kelas iii": "shield_3",
+    "perisai kelas ii": "shield_2",
+    "perisai kelas i": "shield_1",
+    "pistol kelas iii": "pistol_3",
+    "pistol kelas ii": "pistol_2",
+    "pistol kelas i": "pistol_1",
+    "potion merah": "potion_red",
+    "potion merah besar": "potion_red_big",
+    "armor": "armor_item",
+    "premium 1w": "premium_1w",
+    "premium 1 minggu": "premium_1w",
+    "kunci rahasia": "chest_key",
+    "peti rahasia": "secret_chest",
+    "bom": "bomb_item",
+    "awm": "awm_item",
+    "nuklir": "nuke_item",
 }
 
 SECRET_ITEMS = {
@@ -202,6 +238,7 @@ def role_for_level(level: int) -> str:
 def parse_premium_duration(token: str) -> Optional[timedelta]:
     t = token.strip().lower()
     mapping = {
+        "1w": timedelta(days=7),
         "1m": timedelta(days=30),
         "3m": timedelta(days=90),
         "6m": timedelta(days=180),
@@ -341,6 +378,27 @@ def init_db() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_shop_tx_user_created ON shop_transactions(user_id, created_at DESC)")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shop_tx_idem ON shop_transactions(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL")
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS redeem_codes (
+                code TEXT PRIMARY KEY,
+                reward_spec TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                active INTEGER DEFAULT 1
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS redeem_claims (
+                code TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (code, user_id)
+            )
+            """
+        )
         seed_items = []
         idx = 1
         for code, item in SHOP_ITEMS.items():
@@ -484,6 +542,23 @@ def item_name(code: str) -> str:
     return item["name"] if item else code
 
 
+def normalize_key(value: str) -> str:
+    return " ".join(value.strip().lower().replace("_", " ").split())
+
+
+def resolve_item_code(token: str) -> Optional[str]:
+    raw = token.strip().lower()
+    if raw in SHOP_ITEMS or raw in SECRET_ITEMS or raw in SPECIAL_ITEMS:
+        return raw
+    key = normalize_key(raw)
+    if key in ITEM_ALIASES:
+        return ITEM_ALIASES[key]
+    for code, item in {**SHOP_ITEMS, **SECRET_ITEMS, **SPECIAL_ITEMS}.items():
+        if normalize_key(item["name"]) == key:
+            return code
+    return None
+
+
 def user_tag(user_id: int) -> str:
     user = get_user(user_id)
     if not user:
@@ -512,6 +587,34 @@ def consume_item(user_id: int, code: str, qty: int = 1) -> bool:
             conn.execute("UPDATE inventory SET qty=? WHERE user_id=? AND item_code=?", (left, user_id, code))
         conn.commit()
     return True
+
+
+def parse_redeem_reward_spec(spec: str):
+    rewards = []
+    for part in [p.strip() for p in spec.split("+") if p.strip()]:
+        qty = 1
+        key = part.lower()
+        if ":" in key:
+            left, right = key.rsplit(":", 1)
+            if right.strip().isdigit():
+                key = left.strip()
+                qty = max(1, int(right.strip()))
+        key = normalize_key(key)
+        reward = REDEEM_DEFAULT_REWARDS.get(key)
+        if reward:
+            reward_type, value = reward
+            if reward_type == "item":
+                item_code, base_qty = value
+                rewards.append(("item", item_code, base_qty * qty))
+            else:
+                rewards.append((reward_type, int(value) * qty))
+            continue
+        item_code = resolve_item_code(key)
+        if item_code:
+            rewards.append(("item", item_code, qty))
+            continue
+        return None, f"Reward tidak dikenali: '{part}'."
+    return rewards, None
 
 
 def get_best_pistol_class(user_id: int) -> Optional[int]:
@@ -696,13 +799,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Command User\n"
-        "/start\n/p atau /profile (bisa /p @username atau reply)\n/status\n/inv\n/shop\n/secretshop atau /ss\n/buy <kode_item>\n/open\n/pot\n/potbig\n/lp\n/lpm\n/ramal <id/@username>\n"
+        "/start\n/p atau /profile (bisa /p @username atau reply)\n/status\n/inv\n/shop\n/secretshop atau /ss\n/buy <kode_item/nama_item>\n/open\n/pot\n/potbig\n/lp\n/lpm\n/ramal <id/@username>\n"
         "/dor <id/@username> atau reply lalu /dor\n/aim <id/@username> atau reply lalu /aim (owner only)\n"
         "/bom <id/@username>\n/piw <id/@username>\n/dhuar\n"
         "/kp <id/@username> atau reply lalu /kp\n/semak <id/@username> atau reply lalu /semak\n"
         "/transfer <id_tujuan> <jumlah>\n/tf <id_tujuan> <jumlah>\n"
         "/bank\n/deposit atau /dp <jumlah>\n/withdraw atau /wd <jumlah>\n"
-        "/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/help"
+        "/daily\n/weekly\n/cd\n/lb\n/lbglobal\n/redeem <kode>\n/info <item|command>\n/help"
     )
     if update.effective_chat.type == "private":
         await update.message.reply_text(text)
@@ -712,6 +815,52 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📩 Daftar command dikirim ke chat pribadi bot.")
     except Exception:
         await update.message.reply_text("Gagal kirim DM. Silakan start bot di private chat dulu, lalu ulangi /help.")
+
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Gunakan: /info <nama item|command>")
+        return
+    raw = " ".join(context.args).strip()
+    query = raw.lower().lstrip("/")
+    command_info = {
+        "pot": "Pakai Potion Merah untuk memulihkan HP 10%.",
+        "potbig": "Pakai Potion Merah Besar untuk memulihkan HP penuh.",
+        "lp": "Aktifkan lucky buff +5% untuk chest.",
+        "lpm": "Aktifkan lucky buff +15% untuk chest.",
+        "buy": "Beli item dari shop: /buy <kode_item>.",
+        "open": "Buka Peti Rahasia (butuh Kunci Rahasia).",
+        "dor": "Menembak target menggunakan pistol terbaik di inventory.",
+        "redeem": "Klaim kode redeem: /redeem <kode>.",
+        "info": "Lihat info item/command: /info <nama>.",
+    }
+    if query in command_info:
+        await update.message.reply_text(f"ℹ️ /{query}\n{command_info[query]}")
+        return
+    item_code = resolve_item_code(raw)
+    if not item_code:
+        await update.message.reply_text("Item/command tidak ditemukan.")
+        return
+    item = SHOP_ITEMS.get(item_code) or SECRET_ITEMS.get(item_code) or SPECIAL_ITEMS.get(item_code, {})
+    usage_map = {
+        "potion_red": "/pot",
+        "potion_red_big": "/potbig",
+        "armor_item": "Dibeli untuk isi armor ke 100 (otomatis saat pembelian).",
+        "premium_1w": "Beli via /buy premium_1w (aktif premium 7 hari).",
+        "luck_potion": "/lp",
+        "luck_potion_med": "/lpm",
+        "secret_chest": "/open",
+        "bomb_item": "/bom <target>",
+        "awm_item": "/piw <target>",
+        "nuke_item": "/dhuar",
+    }
+    use_text = usage_map.get(item_code, "Tidak ada command khusus (otomatis/consumable umum).")
+    await update.message.reply_text(
+        f"ℹ️ {item.get('name', item_code)} (`{item_code}`)\n"
+        f"Deskripsi: {item.get('desc', '-')}\n"
+        f"Cara pakai: {use_text}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -742,7 +891,14 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Register Date : _{dt.strftime('%Y-%m-%d')}_\n"
         f"Time : _{now.strftime('%H:%M:%S WIB')}_"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    premium_buttons = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("Buy Premium", url="https://t.me/Noturkichan"),
+            InlineKeyboardButton("Buy Token", url="https://t.me/Noturkichan"),
+            InlineKeyboardButton("Buy Cash", url="https://t.me/Noturkichan"),
+        ]]
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=premium_buttons)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1005,6 +1161,27 @@ async def buy_item(user: UserData, code: str, idempotency_key: Optional[str] = N
         item_note = f" | Item: {', '.join(got_items)}" if got_items else ""
         return f"Berhasil beli 🎁 Random Chest dan langsung dibuka!\nChest {chest_tier}{luck_note}: +{reward['cash']} cash, +{token_bonus} token{item_note}\nSisa {currency_type}: {format_int(after_balance)}"
 
+    if code == "premium_1w":
+        price = discount_price(user, base_price)
+        now = now_utc()
+        with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+            current_until_row = c.execute("SELECT premium_until FROM users WHERE user_id=?", (user.user_id,)).fetchone()
+            current_until = datetime.fromisoformat(current_until_row[0]) if current_until_row and current_until_row[0] else None
+            start_from = current_until if current_until and current_until > now else now
+            new_until = start_from + timedelta(days=7)
+            updated = conn.execute(
+                "UPDATE users SET cash=cash-?, premium=1, premium_until=? WHERE user_id=? AND cash>=?",
+                (price, new_until.isoformat(), user.user_id, price),
+            )
+            if updated.rowcount == 0:
+                conn.rollback()
+                log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, before_balance, "failed_insufficient", idempotency_key)
+                return "Cash kamu tidak cukup."
+            conn.commit()
+        after_balance = get_balance(user.user_id, currency_type)
+        log_shop_transaction(user.user_id, code, currency_type, amount, before_balance, after_balance, "success", idempotency_key)
+        return f"✅ Premium 1 minggu aktif sampai {new_until.astimezone(WIB).strftime('%Y-%m-%d %H:%M:%S WIB')}.\nSisa cash: {format_int(after_balance)}"
+
     if inventory_slots_used(user.user_id) >= user.inventory_capacity and get_item_qty(user.user_id, code) == 0:
         return "Inventory penuh. Upgrade tas dulu di shop."
 
@@ -1049,9 +1226,11 @@ async def buy_item(user: UserData, code: str, idempotency_key: Optional[str] = N
 async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update.effective_user)
     if not context.args:
-        await update.message.reply_text("Gunakan: /buy <kode_item>")
+        await update.message.reply_text("Gunakan: /buy <kode_item/nama_item>")
         return
-    res = await buy_item(user, context.args[0].lower())
+    raw_item = " ".join(context.args).strip()
+    code = resolve_item_code(raw_item) or raw_item.lower()
+    res = await buy_item(user, code)
     await update.message.reply_text(res)
 
 
@@ -1063,7 +1242,10 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = payload[1] if len(payload) > 1 else ""
     idem_key = payload[2] if len(payload) > 2 else None
     res = await buy_item(user, code, idempotency_key=idem_key)
-    await query.message.reply_text(res)
+    try:
+        await query.edit_message_text(res)
+    except Exception:
+        await query.message.reply_text(res)
 
 
 async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1640,7 +1822,11 @@ async def guard_user_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text or not update.message.text.startswith("/"):
         return
     user = ensure_user(update.effective_user)
+    cmd_name = update.message.text.split()[0].lower().lstrip("/")
+    dead_whitelist = {"start", "help", "unmute", "info"}
     if user.hp <= 0:
+        if cmd_name in dead_whitelist:
+            return
         await update.message.reply_text(
             "☠️ Kamu sedang mati, jadi tidak bisa menggunakan command apa pun.\n"
             "Pulihkan HP dulu sebelum memakai command lagi."
@@ -1673,6 +1859,12 @@ async def restore_hp_to_max(user_id: int) -> Tuple[int, int]:
         return hp_max, hp_max
 
 
+async def run_unmute_flow(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> Tuple[int, int]:
+    perms = ChatPermissions(can_send_messages=True)
+    await context.bot.restrict_chat_member(chat_id, user_id, permissions=perms)
+    return await restore_hp_to_max(user_id)
+
+
 async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data or {}
     chat_id = data.get("chat_id")
@@ -1680,10 +1872,11 @@ async def revive_after_mute(context: ContextTypes.DEFAULT_TYPE):
     if not chat_id or not user_id:
         return
     try:
-        hp_now, hp_max = await restore_hp_to_max(user_id)
-        perms = ChatPermissions(can_send_messages=True)
-        await context.bot.restrict_chat_member(chat_id, user_id, permissions=perms)
-        await context.bot.send_message(chat_id, f"❤️ User {user_tag(user_id)} pulih otomatis setelah mute. HP {hp_now}/{hp_max}.")
+        hp_now, hp_max = await run_unmute_flow(context, chat_id, user_id)
+        await context.bot.send_message(
+            chat_id,
+            f"🔊 /unmute otomatis dijalankan untuk {user_tag(user_id)}. HP dipulihkan {hp_now}/{hp_max}.",
+        )
     except Exception:
         pass
 
@@ -1708,6 +1901,113 @@ async def handle_death_background(chat_id: int, target_id: int, context: Context
             )
     except Exception:
         pass
+
+
+async def cmd_oinv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Gunakan: /oinv <id/@username>")
+        return
+    uid = resolve_user_by_ref(context.args[0])
+    target = get_user(uid) if uid else None
+    if not target:
+        await update.message.reply_text("User tidak ditemukan.")
+        return
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        rows = c.execute("SELECT item_code, qty FROM inventory WHERE user_id=? AND qty>0 ORDER BY item_code", (uid,)).fetchall()
+    inv_lines = ["- Kosong"] if not rows else [f"- {item_name(code)} x{qty} (`{code}`)" for code, qty in rows]
+    text = (
+        f"🕵️ OINV {target.name} ({target.user_id})\n"
+        f"Username: {target.username}\n"
+        f"Role: {target.role}\n"
+        f"Level: {target.level} ({target.exp}/{exp_needed(target.level)})\n"
+        f"HP/Armor: {target.hp}/{target.hp_max} | {target.armor}/{MAX_ARMOR}\n"
+        f"Cash: {format_int(target.cash)}\n"
+        f"Bank: {format_int(get_bank_cash(target.user_id))}\n"
+        f"Token: {format_int(target.token)}\n"
+        f"Inventory ({inventory_slots_used(target.user_id)}/{target.inventory_capacity}):\n"
+        + "\n".join(inv_lines)
+    )
+    await update.message.reply_text(text)
+
+
+async def cmd_credeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Gunakan: /credeem <kode> <reward + reward2 ...>")
+        return
+    code = context.args[0].strip().upper()
+    reward_spec = " ".join(context.args[1:]).strip()
+    rewards, err = parse_redeem_reward_spec(reward_spec)
+    if err or not rewards:
+        await update.message.reply_text(err or "Reward tidak valid.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        exists = conn.execute("SELECT 1 FROM redeem_codes WHERE code=?", (code,)).fetchone()
+        if exists:
+            await update.message.reply_text("Kode redeem sudah ada. Pakai kode lain.")
+            return
+        conn.execute(
+            "INSERT INTO redeem_codes (code, reward_spec, created_by, created_at, active) VALUES (?, ?, ?, ?, 1)",
+            (code, reward_spec, update.effective_user.id, now_utc().isoformat()),
+        )
+        conn.commit()
+    await update.message.reply_text(f"✅ Redeem code dibuat: {code}\nReward: {reward_spec}")
+
+
+async def cmd_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = ensure_user(update.effective_user)
+    if len(context.args) != 1:
+        await update.message.reply_text("Gunakan: /redeem <kode>")
+        return
+    code = context.args[0].strip().upper()
+    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as c:
+        row = c.execute("SELECT reward_spec, active FROM redeem_codes WHERE code=?", (code,)).fetchone()
+        if not row:
+            await update.message.reply_text("Kode redeem tidak ditemukan.")
+            return
+        reward_spec, active = row
+        if not active:
+            await update.message.reply_text("Kode redeem sudah tidak aktif.")
+            return
+        claimed = c.execute("SELECT 1 FROM redeem_claims WHERE code=? AND user_id=?", (code, user.user_id)).fetchone()
+        if claimed:
+            await update.message.reply_text("Kamu sudah pernah memakai kode ini (1x per user).")
+            return
+        rewards, err = parse_redeem_reward_spec(reward_spec)
+        if err or not rewards:
+            await update.message.reply_text("Kode redeem rusak/invalid. Hubungi owner.")
+            return
+        messages = []
+        for reward in rewards:
+            if reward[0] == "item":
+                _, item_code, qty = reward
+                conn.execute(
+                    """INSERT INTO inventory (user_id, item_code, qty) VALUES (?, ?, ?)
+                       ON CONFLICT(user_id, item_code) DO UPDATE SET qty=qty+excluded.qty""",
+                    (user.user_id, item_code, qty),
+                )
+                messages.append(f"{item_name(item_code)} x{qty}")
+            elif reward[0] == "cash":
+                amt = reward[1]
+                conn.execute("UPDATE users SET cash=cash+? WHERE user_id=?", (amt, user.user_id))
+                messages.append(f"Cash {format_int(amt)}")
+            elif reward[0] == "token":
+                amt = reward[1]
+                conn.execute("UPDATE users SET token=token+? WHERE user_id=?", (amt, user.user_id))
+                messages.append(f"Token {amt}")
+            elif reward[0] == "exp":
+                amt = reward[1]
+                lvl, _ = add_exp(user.user_id, amt)
+                messages.append(f"EXP {amt} (Lv sekarang {lvl})")
+        c.execute(
+            "INSERT INTO redeem_claims (code, user_id, claimed_at) VALUES (?, ?, ?)",
+            (code, user.user_id, now_utc().isoformat()),
+        )
+        conn.commit()
+    await update.message.reply_text(f"🎉 Redeem berhasil ({code})\nHadiah: " + ", ".join(messages))
 
 
 async def cmd_addcoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1797,7 +2097,7 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
     if len(context.args) != 2:
-        await update.message.reply_text("/premiumuser <id/@username> <durasi: 1m|3m|6m|12m|1y>")
+        await update.message.reply_text("/premiumuser <id/@username> <durasi: 1w|1m|3m|6m|12m|1y>")
         return
     uid = resolve_user_by_ref(context.args[0])
     dur = parse_premium_duration(context.args[1])
@@ -1805,7 +2105,7 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User tidak ditemukan")
         return
     if not dur:
-        await update.message.reply_text("Durasi tidak valid. Gunakan: 1m, 3m, 6m, 12m, atau 1y.")
+        await update.message.reply_text("Durasi tidak valid. Gunakan: 1w, 1m, 3m, 6m, 12m, atau 1y.")
         return
     now = now_utc()
     until = now + dur
@@ -1916,6 +2216,40 @@ async def cmd_addexp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_additem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner(update):
+        return
+    args = list(context.args)
+    target_id = parse_target(update, args)
+    if update.message.reply_to_message:
+        args = list(context.args)
+    else:
+        if target_id is None:
+            await update.message.reply_text("Gunakan: /additem <id/@username> <nama/kode_item> [qty] atau reply user lalu /additem <nama/kode_item> [qty]")
+            return
+        args = args[1:]
+    if not args:
+        await update.message.reply_text("Masukkan nama/kode item.")
+        return
+    qty = 1
+    if args and args[-1].isdigit():
+        qty = max(1, int(args[-1]))
+        args = args[:-1]
+    item_query = " ".join(args).strip()
+    if not item_query:
+        await update.message.reply_text("Masukkan nama/kode item.")
+        return
+    item_code = resolve_item_code(item_query)
+    if not item_code:
+        await update.message.reply_text("Item tidak ditemukan.")
+        return
+    if not target_id or not get_user(target_id):
+        await update.message.reply_text("Target user tidak valid.")
+        return
+    add_item(target_id, item_code, qty)
+    await update.message.reply_text(f"✅ Item diberikan: {item_name(item_code)} x{qty} ke {user_tag(target_id)}.")
+
+
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in {"group", "supergroup"}:
         await update.message.reply_text("/mute hanya bisa digunakan di grup.")
@@ -1955,9 +2289,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Gunakan: /unmute <id/@username> atau reply command.")
         return
     try:
-        perms = ChatPermissions(can_send_messages=True)
-        await context.bot.restrict_chat_member(update.effective_chat.id, target_id, permissions=perms)
-        hp_now, hp_max = await restore_hp_to_max(target_id)
+        hp_now, hp_max = await run_unmute_flow(context, update.effective_chat.id, target_id)
         await update.message.reply_text(f"🔊 User {user_tag(target_id)} telah di-unmute. HP dipulihkan {hp_now}/{hp_max}.")
     except Exception:
         await update.message.reply_text("Gagal unmute user. Pastikan bot admin dan punya izin restrict member.")
@@ -2041,6 +2373,8 @@ def main():
     app.add_handler(CommandHandler("cd", cmd_cd))
     app.add_handler(CommandHandler("lb", cmd_lb))
     app.add_handler(CommandHandler("lbglobal", cmd_lbglobal))
+    app.add_handler(CommandHandler("info", cmd_info))
+    app.add_handler(CommandHandler("redeem", cmd_redeem))
     app.add_handler(CommandHandler("help", cmd_help))
 
     app.add_handler(CommandHandler(["addcoin", "ac"], cmd_addcoin))
@@ -2053,6 +2387,9 @@ def main():
     app.add_handler(CommandHandler(["setlevel", "sl"], cmd_setlevel))
     app.add_handler(CommandHandler(["defaultlevel", "dl"], cmd_defaultlevel))
     app.add_handler(CommandHandler(["addexp", "ae"], cmd_addexp))
+    app.add_handler(CommandHandler(["additem", "ai"], cmd_additem))
+    app.add_handler(CommandHandler("oinv", cmd_oinv))
+    app.add_handler(CommandHandler("credeem", cmd_credeem))
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("sniper", cmd_sniper))
